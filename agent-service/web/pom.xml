@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.djzy.assistant</groupId>
+    <artifactId>agent-service</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>agent-service-web</artifactId>
+  <name>agent-service-web</name>
+  <description>agent-service 接入层：SSE 流式对话 + 一次性入场券 + 断线续传（§12.2 / §19.4），工具可见性经网关注入（§19.8 / §4.8 节点 A）</description>
+  <dependencies>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>agent-service-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>runtime-noop</artifactId>
+    </dependency>
+    <!-- 默认运行时实现（ADR-18/31/32）；未列入 tck-passed-runtimes 时不会被选中。 -->
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>runtime-agentscope</artifactId>
+    </dependency>
+    <!--
+      OpenAI 兼容模型扩展：它通过 SPI 注册 openai / deepseek / glm / kimi / minimax 五个 provider。
+      DeepSeek 走的就是这里的 DeepSeekModelProvider（ADR-14 的默认选型）。
+      版本由 agentscope-bom 统一管理，jackson / reactor 仍由 spring-boot-dependencies 压住。
+    -->
+    <dependency>
+      <groupId>io.agentscope</groupId>
+      <artifactId>agentscope-extensions-model-openai</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>common-persistence</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

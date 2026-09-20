@@ -1,0 +1,56 @@
+package com.djzy.assistant.management.web;
+
+import com.djzy.assistant.common.error.UnifiedErrors;
+import com.djzy.assistant.management.service.ForbiddenException;
+import com.djzy.assistant.management.service.UnauthorizedException;
+import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+
+/** 管理后台统一错误出口（§4.5 / §11.3）：对外只有统一措辞，细节只进日志。 */
+@RestControllerAdvice
+public class ApiErrorHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(ApiErrorHandler.class);
+
+    @ExceptionHandler(UnauthorizedException.class)
+    public ResponseEntity<Map<String, String>> unauthorized(UnauthorizedException e) {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of("error", UnifiedErrors.UNAUTHORIZED));
+    }
+
+    @ExceptionHandler(ForbiddenException.class)
+    public ResponseEntity<Map<String, String>> forbidden(ForbiddenException e) {
+        log.warn("管理入口权限不足（骨架期只有 admin 可进，§20.4）");
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", UnifiedErrors.FORBIDDEN));
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, String>> badRequest(IllegalArgumentException e) {
+        log.warn("请求不合法：{}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", UnifiedErrors.INVALID_REQUEST));
+    }
+
+    /**
+     * 参数缺失 / 类型不对（如 {@code ?enabled=abc}、漏传 {@code from}）→ 400。
+     *
+     * <p>这两类默认会被下面的兜底当成 500，把「调用方写错了」误报成「服务坏了」，也会污染错误率指标。
+     */
+    @ExceptionHandler({MissingServletRequestParameterException.class, MethodArgumentTypeMismatchException.class})
+    public ResponseEntity<Map<String, String>> badParameter(Exception e) {
+        log.warn("请求参数不合法：{}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(Map.of("error", UnifiedErrors.INVALID_REQUEST));
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<Map<String, String>> internal(Exception e) {
+        log.error("管理后台内部错误", e);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(Map.of("error", UnifiedErrors.SERVICE_UNAVAILABLE));
+    }
+}

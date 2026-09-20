@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.djzy.assistant</groupId>
+    <artifactId>agent-service</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>agent-service-core</artifactId>
+  <name>agent-service-core</name>
+  <description>平台 core：会话编排、SSE 投影、工具管线、台账、审计；禁止 import 任何 agent 框架包（§18.11.4 闸一）</description>
+  <dependencies>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>agent-spi</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>common-platform</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.projectreactor</groupId>
+      <artifactId>reactor-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

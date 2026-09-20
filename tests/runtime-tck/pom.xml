@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.djzy.assistant</groupId>
+    <artifactId>doctor-data-assistant</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <relativePath>../../pom.xml</relativePath>
+  </parent>
+  <artifactId>runtime-tck</artifactId>
+  <name>runtime-tck</name>
+  <description>agent 运行时契约回归（§18.11.7 / §16-9）：新实现必须先跑通才能上线</description>
+  <dependencies>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>agent-spi</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.projectreactor</groupId>
+      <artifactId>reactor-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>common-platform</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>runtime-noop</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>agent-service-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

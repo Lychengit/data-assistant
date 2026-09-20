@@ -1,0 +1,62 @@
+server:
+  port: ${SERVER_PORT:8081}
+
+spring:
+  application:
+    name: agent-service
+  datasource:
+    # 只用来查账号状态（§19.4：网关/入口每次请求查一次 sys_user.status）。
+    url: ${AGENT_DB_URL:jdbc:postgresql://localhost:5432/doctor_assistant}
+    username: ${AGENT_DB_USER:assistant}
+    password: ${AGENT_DB_PASSWORD:}
+  data:
+    redis:
+      host: ${AGENT_REDIS_HOST:localhost}
+      port: ${AGENT_REDIS_PORT:6379}
+      password: ${AGENT_REDIS_PASSWORD:}
+      timeout: 2s
+
+agent-service:
+  token-key-id: ${AGENT_TOKEN_KEY_ID:login-token}
+  # §20.1.5：密钥缺失即拒绝启动。login-token 必须与 management-service 的签发密钥一致；
+  # agent-service 是调用网关时用的服务密钥（网关侧同名 keyId 必须配同一个 secret）。
+  secrets:
+    login-token: ${AGENT_JWT_SECRET:}
+    agent-service: ${AGENT_SERVICE_SECRET:}
+  gateway-key-id: ${AGENT_GATEWAY_KEY_ID:agent-service}
+  # 留空 = 骨架期不接数据面（工具清单为空，模型调不到任何工具）。
+  gateway-url: ${AGENT_GATEWAY_URL:}
+  runtime-id: ${AGENT_RUNTIME_ID:noop}
+  tck-passed-runtimes: ${AGENT_TCK_PASSED:noop}
+  max-iters: ${AGENT_MAX_ITERS:10}
+  ticket-ttl: ${AGENT_TICKET_TTL:60s}
+  turn-deadline: ${AGENT_TURN_DEADLINE:5m}
+  stream-timeout: ${AGENT_STREAM_TIMEOUT:10m}
+  turns-per-minute: ${AGENT_TURNS_PER_MINUTE:30}
+  # 多副本必须改成 redis（单实例内存券无法保证跨实例一次性）。
+  ticket-store: ${AGENT_TICKET_STORE:memory}
+  # 限流计数落点（§2.3：计数一律 Redis，禁止本地内存计数）；memory 只留给单副本骨架场景。
+  rate-limit-store: ${AGENT_RATE_LIMIT_STORE:memory}
+  thinking-visibility: ${AGENT_THINKING_VISIBILITY:step_card_only}
+  event-log-dir: ${AGENT_EVENT_LOG_DIR:./data/eventlog}
+  state-dir: ${AGENT_STATE_DIR:./data/agent-state}
+  # 运行时状态落点（§19.5）：pg = 挂起/快照落 PG，SSE 可落任意副本、换 pod 不丢状态；
+  # file = 本地卷 JSON，只留给单副本骨架场景（多副本会变成隐性单点，§2.3）。
+  state-store: ${AGENT_STATE_STORE:pg}
+  instance-id: ${AGENT_INSTANCE_ID:}
+  # 落库通道（§19.6）：redis-stream = XADD 投递 / XREADGROUP 消费 / XPENDING 退避，死信仍写 PG 的
+  # event_dead_letter；pg-outbox = 事件入队 event_outbox；none = 只落本地 append-only 日志
+  # （日志本来就是唯一事实源，队列只是搬到事实表的通道）。
+  # 生产按 §19.6 走 redis-stream；骨架期默认 pg-outbox 是为了「只有 PG 也能跑」，不留隐性中间件依赖。
+  event-bus: ${AGENT_EVENT_BUS:pg-outbox}
+  # Redis Stream 名（event-bus=redis-stream 时才用）；多环境共用一个 Redis 时必须各用各的。
+  event-stream: ${AGENT_EVENT_STREAM:doctor:events}
+  # event-persist 消费者的轮询间隔；攒批本身按 50 条 / 100ms / 单批 500 条（§19.6）。
+  event-persist-interval-ms: ${AGENT_EVENT_PERSIST_INTERVAL_MS:200}
+  # 模型 API Key 的解密根密钥（Base64 的 32 字节，§20.1.6）。
+  # 必须与管理端的 MANAGEMENT_LLM_KEK 是同一把：密文是管理端写的，这里只负责解。
+  llm-kek: ${AGENT_LLM_KEK:}
+
+logging:
+  level:
+    com.djzy.assistant: INFO

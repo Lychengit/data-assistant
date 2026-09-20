@@ -1,0 +1,32 @@
+server:
+  # 与 §20.3 固定配置发现一致：容器内统一监听 8080，网关按服务名 http://{service}:8080 转发。
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: interface-doctor
+  datasource:
+    url: ${IFACE_DOCTOR_DB_URL:jdbc:postgresql://postgres:5432/doctor_assistant}
+    username: ${IFACE_DOCTOR_DB_USER:assistant}
+    password: ${IFACE_DOCTOR_DB_PASSWORD:}
+  jackson:
+    deserialization:
+      # I3：出现 DTO 未声明的字段即 400。参数白名单因此来自代码本身，不再另配一份清单——
+      # 而"模型按说明书传参、代码里没这个字段"这种不一致，启动自检还会提前对账一次。
+      fail-on-unknown-properties: true
+
+interface-doctor:
+  # §20.1.2：只保存「允许调用我的服务」的密钥——接口服务只应接受网关的连接。
+  # 密钥由环境变量 / docker-compose secret 注入，缺失即拒绝启动（§20.1.5）。
+  allowed-callers:
+    gateway: ${IFACE_DOCTOR_GATEWAY_SECRET:}
+  # 多副本必须改为 redis（§20.1.4-3），否则防重放不完整。
+  nonce-store: ${IFACE_DOCTOR_NONCE_STORE:memory}
+  # 本服务业务接口的路径前缀：既是验签保护范围，也是启动自检的边界。
+  api-prefix: ${IFACE_DOCTOR_API_PREFIX:/doctor}
+  # 单次查询返回行数上限：超出即截断并标注，防止把模型上下文打爆（§4.8）。
+  max-rows: 5000
+
+logging:
+  level:
+    com.djzy.assistant: INFO

@@ -1,0 +1,31 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: data-gateway
+  datasource:
+    url: ${GATEWAY_DB_URL:jdbc:postgresql://postgres:5432/doctor_assistant}
+    username: ${GATEWAY_DB_USER:assistant}
+    password: ${GATEWAY_DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: 20
+
+# §20.1.5：密钥缺失即拒绝启动。部署时由 docker-compose secret / 环境变量注入。
+gateway:
+  token-key-id: ${GATEWAY_TOKEN_KEY_ID:login-token}
+  outbound-key-id: gateway
+  secrets:
+    login-token: ${GATEWAY_JWT_SECRET:}
+    gateway: ${GATEWAY_OUTBOUND_SECRET:}
+  allowed-callers:
+    agent-service: ${GATEWAY_AGENT_SERVICE_SECRET:}
+    management-service: ${GATEWAY_MANAGEMENT_SERVICE_SECRET:}
+  service-base-url-template: ${GATEWAY_SERVICE_URL_TEMPLATE:http://{service}:8080}
+  nonce-store: ${GATEWAY_NONCE_STORE:memory}
+  per-user-qps: ${GATEWAY_PER_USER_QPS:5}
+  max-response-bytes: 262144
+
+logging:
+  level:
+    com.djzy.assistant: INFO

@@ -1,0 +1,35 @@
+server:
+  port: ${SERVER_PORT:8082}
+
+spring:
+  application:
+    name: management-service
+  datasource:
+    # 平台元数据出口直连 PG（§18.4.6）；生产应使用只读账号做查询、单独账号做配置变更。
+    url: ${MANAGEMENT_DB_URL:jdbc:postgresql://postgres:5432/doctor_assistant}
+    username: ${MANAGEMENT_DB_USER:assistant}
+    password: ${MANAGEMENT_DB_PASSWORD:}
+
+management-service:
+  token-key-id: ${MANAGEMENT_TOKEN_KEY_ID:login-token}
+  # §20.1.5：密钥缺失即拒绝启动；须与网关的 GATEWAY_JWT_SECRET 一致（同一签发/校验密钥）。
+  secrets:
+    login-token: ${MANAGEMENT_JWT_SECRET:}
+  token-ttl: ${MANAGEMENT_TOKEN_TTL:15m}
+  refresh-ttl: ${MANAGEMENT_REFRESH_TTL:8h}
+  # 审计 / 平台元数据只读出口（§18.4.6 / §20.4）：不配置则退化为「主连接 + 只读会话」。
+  # 生产必须给一个**只有 SELECT 权限**的账号，审计读与配置写用两条通道。
+  read-only:
+    url: ${MANAGEMENT_READONLY_DB_URL:}
+    username: ${MANAGEMENT_READONLY_DB_USER:}
+    password: ${MANAGEMENT_READONLY_DB_PASSWORD:}
+  # M3 技能包存放目录（内容寻址命名，§19.2）；生产指向对象存储挂载点（MinIO 接入后换实现）。
+  skill-package-dir: ${MANAGEMENT_SKILL_PACKAGE_DIR:./data/skill-packages}
+  # 模型 API Key 的加密根密钥（Base64 的 32 字节，§20.1.6）。生成：openssl rand -base64 32。
+  # 必须与 agent-service 的 AGENT_LLM_KEK 是同一把，否则 agent 侧解不出密文。
+  # 留空不阻塞启动，但管理端无法保存模型密钥（查看不受影响）——不退化成明文落库。
+  llm-kek: ${MANAGEMENT_LLM_KEK:}
+
+logging:
+  level:
+    com.djzy.assistant: INFO

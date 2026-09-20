@@ -1,0 +1,58 @@
+# 骨架期本地环境（§13）：PG + Redis + MinIO + OTel Collector + Prometheus
+# 注意：agent-service / data-gateway / 接口服务 / management-service 的容器定义在各自模块
+# 具备 Spring Boot 启动类后补入；skill-execution-service 骨架期内嵌 agent-service（§19.11）。
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      # 与各服务 application.yml 的默认数据源保持一致（否则本地联调连不上）。
+      POSTGRES_DB: doctor_assistant
+      POSTGRES_USER: assistant
+      POSTGRES_PASSWORD: assistant
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant -d doctor_assistant"]
+      interval: 5s
+
+  redis:
+    # 仅热数据与「落库通道」；不可用 allkeys-lru（§19.6）
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    ports: ["6379:6379"]
+    volumes:
+      - redisdata:/data
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: djzy
+      MINIO_ROOT_PASSWORD: djzy-minio
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - miniodata:/data
+
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel/config.yaml:/etc/otel/config.yaml:ro
+    ports: ["4317:4317", "4318:4318"]
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  # 会话日志卷：agent-service 必须挂真实卷到 /data/eventlog，卷不可用则拒绝启动（ADR-28）。
+  eventlog:
