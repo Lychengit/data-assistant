@@ -1,6 +1,8 @@
 package com.djzy.assistant.management.skill;
 
 import com.djzy.assistant.common.api.ApiRoute;
+import com.djzy.assistant.common.skill.PackageContent;
+import com.djzy.assistant.common.skill.SkillManifest;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;

@@ -1,6 +1,6 @@
 # 系统设计规格说明书：医生数据智能助理（工程级完整版）
 
-**文档版本**: v3.3（文件 `医生数据智能助理-系统设计规格说明书-harness-v1.0.md`，即 harness 分支线主线）
+**文档版本**: v3.6（文件 `医生数据智能助理-系统设计规格说明书-harness-v1.0.md`，即 harness 分支线主线）
 **状态**: 待骨架开发（范围经 ADR-15~18 收窄：骨架期仅 AgentScope 慢路径；服务拓扑与服务架构以 §18 定稿 ADR-20 为准；契约与状态机以 §19 为准；快路径、业务工具契约、业务测试数据后置。v3.2 新增：ADR-27 复用 AgentScope 内置能力（权限 / 事件 / 中间件 / Trace），ADR-28 会话日志先行（append-only 日志是唯一事实源，队列只是落库通道）。**v3.3 新增：ADR-18 二次修订（采用 `HarnessAgent` 作为装配外壳，原「不采用」结论作废）、ADR-29 工具执行管线五段、ADR-30 编排职责边界、ADR-31 HarnessAgent 装配基线；新增 §9.5 为工具执行面的唯一定义（§19 / §20 仍是契约与状态机的唯一契约源）**）
 **目标产品**: 基于自然语言的企业级多角色数据查询与分析智能助理
 **交付形态**: 全新独立项目（自建管理系统 + 数据网关与接口服务 + 自建数据源与权限体系）
@@ -39,13 +39,13 @@
   4. 骨架期零缓存（含权限，直查 PG）；
   5. 工具入参结构化白名单，用户输入永不直接拼接 SQL；
   6. 数据级校验一律在接口服务层（data-gateway 之后的业务接口服务；Agent 层只做语义级约束）。
-  7. 服务间调用必须带 API Key + HMAC 签名（防伪 / 防篡改），接口服务**验签但不判定**（不查权限库、不回查网关、不重算范围）；数据范围一律取**多角色并集**（§19.1 / §20.1）。
+  7. 服务间调用必须带 API Key + HMAC 签名（防伪 / 防篡改），接口服务**验签但不判定接口可用性**（不查权限库、不回查网关）；**数据范围不由网关计算、也不下发**，由接口服务基于登录人自行推导（§19.1 / §19.7 / §20.1 / ADR-37）；
   8. 所有服务**无状态、可水平扩展、不允许单点**：业务状态一律外置（会话 / 挂起 / 待确认落 PG），计数类（限流 / 用量 / 并发）一律放 Redis，定时任务与投递器用分布式锁；代码与配置不得依赖单实例（§2.3 / §13）；
   9. 业务对象数据**只能经 data-gateway 取**（用户端 / 技能 / 管理端一律如此）；平台元数据与审计读走独立只读出口且只对 admin 开放（§2.3 / §18.4.6）；
-  10. 会话日志（append-only）是**唯一事实源**：先写日志再投递，历史 / 回放 / 断线续传 / 评估一律从日志派生；队列（Redis / MQ）只是落库通道，其故障不得导致事件消失（§19.6 / ADR-28）；
+  10. 会话事件日志（append-only）是**审计与事实表的唯一事实源**：先写日志再投递，审计 / 回放 / 评估 / 事实表一律从日志派生；**会话正文与历史不在此列——它的权威是框架 `AgentState`**（§19.5 / §19.6 / ADR-35）；队列（Redis / MQ）只是落库通道，其故障不得导致事件消失（§19.6 / ADR-28）；
   11. **不重复实现框架已有能力**：工具级权限闸门用 AgentScope Permission System（Rules + Mode + `ToolBase#checkPermissions`；**只管「工具要不要执行 / 要不要问用户」，数据级授权仍在平台网关 `G3` + 接口服务 `F`**，见 ADR-32 ④ / §9.5）、步骤事件用框架 typed events、横切口用 Middleware 5 钩子、Trace 用框架 OTel 中间件（§4.8 / §10.1 / §12.2 / ADR-27）；状态持久化 / 技能仓库 / 调度 / 对象存储同理复用 `agentscope-extensions` 官方模块（ADR-27）；agent 装配以 `HarnessAgent` 为外壳并按 **ADR-31 基线**关闭文件与命令能力（ADR-18 / ADR-31）；
   12. **工具调用必须走唯一执行管线**（§9.5 / ADR-29）：PRE → GUARD → EXECUTE → POST → RESULT 五段，唯一引擎 `ToolPipelineRunner`，**GUARD 段只能收紧、不可放行**；技能与沙箱等 external execution 必须经**通道适配器**映射进同一管线（`onActing` 追踪不到它们），任何服务不得另立特例；
-  13. **编排职责单一**（ADR-30）：Graph 只承担「跨请求、可恢复的业务流程」（HITL / 检查点 / 选路），单次 `call` 内的横切一律 Middleware；**append-only 日志是唯一事实源，Graph 检查点与 `AgentStateStore` 只是派生视图**；
+  13. **编排职责单一**（ADR-30）：Graph 只承担「跨请求、可恢复的业务流程」（HITL / 检查点 / 选路），单次 `call` 内的横切一律 Middleware；**append-only 日志是审计与事实表的唯一事实源；会话状态的权威是 `AgentStateStore`**——两条链分工不合并（ADR-35 ①），Graph 检查点与平台侧快照是 `AgentStateStore` 的派生视图；
   14. **agent 运行时必须可插拔**（§18.10 / ADR-32）：只允许通过 `common/agent-spi` 的 `AgentRuntimePort` 接入——**`agent-service/core` 禁止 import 任何框架包**；**工具调用 100% 经平台 `ToolInvoker`**（运行时不得持有数据面凭据、不得直连网关）、**事件 100% 以中立 `AgentEvent` 上报**、**状态必须可导出为 `Snapshot`**；换实现只换 `runtime-<vendor>` module + 配置 `agent.runtime=<id>`，**不得影响任何其它服务节点**；新实现必须先过契约回归（TCK）才能上线；
   15. **用户自建技能的执行必须在平台侧沙箱**（§18.12 / ADR-33）：技能的**定义与审批**可下放给用户（每用户命名空间 + 草稿→审批→发布），但技能的**执行**一律交 `skill-execution-service` + `sandbox-runner`，并落在 §9.5 管线的 EXECUTE 段之内；**ADR-31 基线不变**（运行时不执行任何工具）；`HarnessAgent` 的默认文件系统是宿主 shell（`LocalFilesystemWithShell`），**不得以默认配置对外提供脚本执行**；将来若要改回运行时侧执行，必须满足 §18.12.4 的七个必配项并另写 ADR；**用户脚本的触达范围有且只有「容器内临时环境 + 本用户工作区」**——§18.12.5 的不可达资源清单（宿主其它路径、其它用户沙箱与工作区、同宿主上的其它容器、宿主 Docker、平台内部服务、云元数据、公网）逐项成立；**跨用户自定义技能不可见、不可列举、不可触发、不可装载**；
   16. **沙箱取数只能经宿主代理**（§18.4.4 / ADR-34）：沙箱**容器 `network("none")`、不持有任何凭据**；脚本要取数只能把请求写进挂载的 IO 目录，由**宿主代理**做「接口白名单 + 入参 schema + 带令牌代调网关 + 记审计」四道检查后代劳；**沙箱数据令牌只存在于宿主代理，不进入容器**（§18.12.5 不可达资源清单逐项实测）。
@@ -93,6 +93,9 @@ doctor-data-assistant/
 | v3.1 | 第二轮设计对齐（2026-09-18）：① **数据范围简化**——删掉通用 `scope` 操作符字典与「技能声明范围」，范围**只在 `role_api.scope` 一处**承载（可见业务对象集合），技能只给接口调用资格；范围 → SQL 由**接口服务**按业务表归属字段拼 WHERE；补 **fail-closed**（解析失败 / 无来源 → 403，绝不当「全部」）；`role_skill` 收敛为单字段 `can_view`（**可见即可执行**，不拆 `can_view` / `can_invoke` 两个字段）；删 `role_api.is_read_only`；`sys_api.method` 明确为**副作用等级而非权限**（只决定确认 / 重试 / 审计 / 超时）（§4.1 / §4.6 / §4.7 / §4.9 / §4.10 / §19.1 / §19.13 / §20.12）；② **落库口径改为「先入队、消费端攒批落库」**（50 条 / 100ms + 单批上限 500），明示丢失窗口与 ≤1s 延迟，补死信表与滞后告警，本地 WAL 列为后置路线（§19.6 / §8.3 / §8.4 / §16-5，新增 **ADR-25 / ADR-26**）；③ **全局硬约束「无状态 / 可水平扩展 / 不允许单点」**：计数一律 Redis 原子计数、业务状态外置、定时任务与投递器用分布式锁、网关与入口可多副本（§0.3-8/9 / §2.3 / §9.3 / §13 / §18.4.2 / §17）；④ **时间口径**新增 §6.6（业务时区 `Asia/Shanghai` + UTC 存储 + 左闭右开区间 + 相对时间由程序解析），口径字典加 `timezone`；⑤ **JWT 寿命 ≤15 分钟** + refresh token + 网关每次查用户状态（停用 / 离职立即生效，角色变更最多 15 分钟延迟生效，不引入版本号，§19.4）；⑥ **表分区与冷热分层列为后置路线**并留三个零成本口子（§20.5 / §8.3）；⑦ 文档矛盾对齐：确定性查询表单统一为**骨架期不实现**（§0.2-9 / §9.2 / §12.2 / §16-6 / §20.2 / §20.12）、`capabilities` 统一为**骨架期零缓存**（§19.8）；⑧ 小口子：技能包**内容寻址**存储（§19.2 / §18.5.2）、技能模块**独立线程池隔离**（§19.11 / §9.3）、沙箱产物由**宿主代理经网关上传**（§18.5.3）、写操作**每轮 ≤3 次** + `confirmId` 一次性（§19.9） |
 | v3.2 | 复用框架内置能力 + 会话日志先行（2026-09-19）：① **ADR-27**——AgentScope core 已有的 **Permission System**（`ALLOW/DENY/ASK/PASSTHROUGH` 规则 + `DEFAULT/ACCEPT_EDITS/EXPLORE/BYPASS/DONT_ASK` 模式 + `ToolBase#checkPermissions` 不可绕过的运行时检查）、**typed event 事件集**（含 `REQUIRE_USER_CONFIRM` / `ALL_TOOLS_DENIED` / `SUBAGENT_EXPOSED` / `EXCEED_MAX_ITERS` / `CUSTOM`）、**Middleware 5 钩子**（`onAgent` / `onReasoning` / `onActing` / `onModelCall` / `onSystemPrompt`）、**OTel tracing 中间件**必须复用；A–F 节点 / §12.2 SSE 事件表 / §10.1 span 打点改为**映射**而非自研（§4.8 / §10.1 / §12.2）；② **ADR-28**——**修订 ADR-25**：会话事件**先追加写本地 append-only 日志（唯一事实源，按批 `fsync`，必须挂真实卷、缺卷拒绝启动）再投递**，Redis / MQ 降级为「落库通道」，**删掉「已接受的丢失窗口」**；「模型可见即落库」，历史 / 回放 / 断线续传 / fork-resume 一律从日志派生（§0.3-3/10/11、§2.3、§8.4、§14-8、§16-5、§19.6、§19.13）；③ 规格书文件同步改名为 `医生数据智能助理-系统设计规格说明书-v3.2.md`（沿用 v2.8 起的「文件名与正文版本统一」约定） |
 | v3.3 | 采纳 HarnessAgent 作为装配外壳 + 工具执行管线化 + 编排职责边界（2026-09-19）：① **ADR-18 二次修订**——从「不采用 HarnessAgent」改为**采用其作为装配外壳**（内层仍是 core `ReActAgent`），原三条理由已被 `disableXxx()` / `stateStore(...)` 推翻，并记录三条硬风险（缺省 `JsonFileAgentStateStore` / 缺省 workspace 路径 / `fromAgent` 行为不等价）；② **新增 ADR-31 装配基线**——基线关闭文件 / Shell / 记忆 / 子 agent / 工作区上下文，显式给 `stateStore` / `workspace` / `permissionContext` / 工具管线；且**不采用框架 `toolResultEviction`**（与关闭文件工具冲突），改用 POST 段 spill；③ **新增 ADR-29 工具执行管线五段**（PRE / GUARD / EXECUTE / POST / RESULT）——唯一引擎 `ToolPipelineRunner` + `ToolPipelineMiddleware`（挂 `onActing`）+ **external execution 通道适配器**（技能与沙箱 job 不被 `onActing` 追踪，必须订阅 `REQUIRE_EXTERNAL_EXECUTION` / `EXTERNAL_EXECUTION_RESULT` 映射进同一管线）；新增 **§9.5** 为工具执行面的唯一定义，§9.1 / §10.4 / §18.4.3 S4 / §19.9 改为指向 §9.5；④ **新增 ADR-30 编排职责边界**——Graph 管「跨请求、可恢复的业务流程」，Middleware 管「单次 `call` 内横切」，**事实源是 append-only 日志**（ADR-28），Graph 检查点与 `AgentStateStore` 降为派生视图；⑤ **ADR-27 扩充**——平台能力同复用 `agentscope-extensions` 官方模块（`PostgresAgentStateStore` / `RedisAgentStateStore` / 技能 PG 仓库 / AG-UI / scheduler / OSS / DockerSandbox）；⑥ 规格书文件改名为 `医生数据智能助理-系统设计规格说明书-v3.3.md`（**该 harness 分支线随后再改名为 `医生数据智能助理-系统设计规格说明书-harness-v1.0.md`**）；⑦ **ADR-32 agent 运行时端口（可插拔）**——新增 `common/agent-spi`（`AgentRuntimePort` + 中立 `AgentEvent` / `AgentRunRequest` / `Snapshot` + `ToolInvoker` 回调 SPI），`agent-service/core` 禁止 import 框架包、换实现只换 `runtime-<vendor>` module + 一行配置；三条不变量（工具调用 100% 经 `ToolInvoker` / 事件归一化为 `AgentEvent` / 状态可导出 `Snapshot`）；**安全底线从框架移回平台**（修订 ADR-27）、**管线归属平台 core**（修订 ADR-29）；会话绑定 `runtime_id`、不允许跨实现恢复；新增 §18.10 / §19.14；⑧ **新增 ADR-33 用户自建技能与脚本的执行归属**（§18.12 / §0.3-15 / §16-10）——技能的**定义**可下放给用户（每用户命名空间 + 草稿→审批→发布），技能的**执行**必须在平台侧沙箱；定这条的直接依据是：`HarnessAgent` 的默认文件系统是宿主 shell（`LocalFilesystemWithShell`，无沙箱无进程隔离），故 **ADR-31 基线不变**；⑨ 文档一致性对齐（不影响设计结论）：§14-1 补入 `common/agent-spi` / `agent-service/core` + `runtime/*` / `skill-execution-service` / `sandbox-runner` 并标注依赖方向，§14-5 把「AgentScope ReAct loop」改为 `HarnessAgent` 装配外壳 + §9.5 管线 + `AgentRuntimePort` 接入，§18.10 补「本版默认实现 = `runtime-agentscope`」；⑩ 文档一致性对齐（不影响设计结论）：§18.0「不用 harness」改为指向 ADR-01 / ADR-18 二次修订 / ADR-31，§18.0「py 沙箱允许联网、出网白名单=仅网关」改为与 ADR-33 ⑤ / §18.12.5 一致的「默认 `network("none")` + 平台侧代调」，§0.5 v2.5 行就地标注该口径作废；⑪ 沙箱取数通道统一为「容器无网络 + 宿主代理代调」（ADR-34）：§3.1 / §3.2 / §5.3 / §18.0 / §18.1.1 / §18.1.2 / §18.1.3 / §18.4.3 S5 / §18.4.4 / §18.5.1 / §18.5.2 / §18.12.5 / §20.1.5 / §20.9 全部对齐；新增 **ADR-34**；§18.4.4 补「宿主代理」定义与 IO 目录协议；manifest 字段由 network 改为 data 取数策略；§0.3 补第 16 条硬约束；§16-10 补「容器无网卡、无凭据」实测项 |
+| v3.4 | 多副本会话管理定稿（2026-09-26）：① 新增 **ADR-35**——会话状态与历史**只有一份权威**（框架 `AgentState`，落 PG，实现用框架扩展 `agentscope-extensions-jdbc`），平台不再自建会话记录（`SessionJournal` / `SessionHistory` 删除，历史改为状态的纯函数投影，并明示其有损）；**明确两条链分工**（会话正文 = 框架状态；审计与事实表 = append-only 日志），**不许用日志重放去恢复会话**；② 多副本口径写进 §19.4 / §19.5 / §19.6 / §8.4 与 §0.3-10/13：会话与券/坑位全部走共享存储，实例内存只留「这一轮的回放位」（有界可淘汰）；**同一会话跨副本同时只允许一轮**（Redis 轮次坑位 + CAS 底线）；实例硬挂时用「开始标记 + 坑位无人占」判定中断并给出用户可读说明；**跨实例接流降级为「等本轮结束再整段补」**（不做跨副本实时推送，留作后续项）；③ 共享单例 agent（键 = 工具面 + 模型 + 迭代上限，每轮注入提示词与回调、每轮结束清理 slot 缓存），每轮工具清单走框架原生机制（完整编组 + 会话激活组），禁止每轮增删工具；④ 本机多副本冒烟脚本 `deploy/local-windows/two-instance-smoke.ps1` 与两实例集成用例（`AgentWebMultiInstanceTest`）落地；实现与后续项台账见 `doc/refactor/TASKS.md`。 |
+| v3.5 | 数据范围归属定稿：**由接口服务基于登录人自行推导**（2026-09-26，新增 **ADR-37**，ADR-23 ② / ADR-26 ① / ADR-22 的「网关下发 scope」表述一并修订）：① **网关只做两件事**——解析身份（JWT → `userId` → 角色集）与判定**接口可用性**（`apiSet`，多角色并集），然后把 `userId + requestId` 放进请求体下发并**对请求签名**（API Key + HMAC，§20.1）；**数据范围不在网关计算、也不下发**。② **范围推导与「范围 → SQL」都在接口服务**：拿登录人 `userId` + 自己业务表的归属字段（如 `doctor.owner_id = :userId`）拼 WHERE；推导不出来 / 缺归属信息 → **403（fail-closed）**，绝不当「全部」。③ **范围不落配置表**：`role_api.scope` 与 `sys_api.column_whitelist` 两列已在 V13 迁移 DROP（`role_api` 退化成纯关联表：只回答「这个角色能不能调这个接口」）；**列级没有白名单**——返回哪些列由接口自己的 SQL 与返回类型写死。④ 正文同步落点：§0.3-7/12、§1、§3.4–§3.5、§4.1、§4.3、§4.5–§4.10、§6.6、§7.1、§11.2、§16-1、§17、§18.1.2–§18.1.3、§18.4.2、§18.4.5–§18.4.6、§18.5.1、§18.8、§19.1、§19.3、§19.7、§19.13、§20.1、§20.12；实现台账见 `doc/refactor/TASKS.md`（T1-16 / ADR-37）。 |
+| v3.6 | 跨副本实时续看落地（H-01，2026-09-26；新增 **ADR-38**，并修订 ADR-36 ③ 的「只需接线」判断）：① **接入层的「这一轮正在产出什么」改为走框架 `MessageBus` 的会话事件语义**（`sessionPublishEvent` / `sessionReadEvents`），底座由平台实现（`RedisMessageBus`，键前缀 `agent-service:bus:`、日志带 TTL；单实例 / 测试用 `InMemoryMessageBus`，**退化而不是报错**）——经源码核查，框架 2.0.3 只有工作区文件版 `WorkspaceMessageBus`（服务 agent 内部的收件箱 / 异步工具 / 子代理，平台一律关闭），**并没有 Redis 版现成实现**，所以这里实现的是框架接口、复用的是框架默认方法。② **接流选「追日志」而不是「订阅推送」**：条目号单调递增，按游标读天然有序、不重不漏（推送在重连交界处必丢或必重，得再写一层去重与排序），代价是延迟上限 = 一个轮询间隔（默认 200ms）。③ **实时只是加速、不是前提**：追不到内容仍走「等跑完整段补 / 中断 / 超时」三条交代；**已经读到实时内容时不再整段补**（否则同一段回答会下发两遍）。④ **总线是临时数据**（TTL + 按条数封顶），会话正文的权威仍是 PG 里的框架状态（ADR-35 ① 不变）。正文同步 §19.4；实现台账见 `doc/refactor/TASKS.md`（H-01 已完成，H-10 拆出剩余子项）。 |
 ## 1. 关键决策记录（ADR 摘要）
 
 | # | 决策点 | 结论 |
@@ -116,21 +119,25 @@ doctor-data-assistant/
 | ADR-17 | 用户预加载位置 | 用户长期偏好/习惯等档案由 Graph「上下文装配节点」每轮一次直查 PG 注入 Agent 首轮 Prompt；不进 ReAct loop、不作为工具结果、权限范围明细仍不进 Agent 上下文 |
 | ADR-18 | 技术选型修订（v3.3 二次修订） | **修订 v2.2 的「不采用 HarnessAgent」结论：骨架期采用 `HarnessAgent` 作为装配外壳**，内层仍是 `io.agentscope.core.ReActAgent`（`HarnessAgent#getDelegate()`），授权判定 / 事件 / 横切仍走 core（ADR-27 不变）。**原「不采用」的三条理由已被新版推翻**：①「自动注入文件 / 记忆 / 会话工具」→ 现有 `disableFilesystemTools()` / `disableShellTool()` / `disableMemoryTools()` / `disableMemoryHooks()` / `disableWorkspaceContext()` / `disableSubagents()` / `disableToolsConfig()` 可逐项关闭；②「会话与长期记忆落 workspace 文件，与 PG 重复」→ `stateStore(...)` 可替换为 `PostgresAgentStateStore`；③「只需要 MCP 查询工具」→ 外壳额外白拿 compaction / MCP 工具粒度白名单 / 技能仓库（含 PostgreSQL 后端）/ 子 agent 编排 / Sandbox / 调度 / AG-UI，多为本设计原计划自研的部分。**骨架期基线见 ADR-31（必守）**。**三条硬风险（必须处理）**：① `stateStore` 缺省为 `JsonFileAgentStateStore`（`~/.agentscope/state/<agentId>/`），不显式覆盖即违反 §19 的「挂起状态落 PG + 多副本共享」；② `workspace` 缺省为 `${user.dir}/.agentscope/workspace`，必须显式指定；③ `fromAgent(ReActAgent)` 只是**部分**迁移助手，且官方明说 HarnessAgent 会额外安装 workspace projection / agent-tracing / 默认 skill·subagent middleware，**行为不等价**，任何切换都要跑对拍回归。**回退路径**：若选择最小依赖，可退回 core `ReActAgent`；因 `fromAgent()` 存在，两个方向都是装配层替换而非重写，**该决策可逆**。落点同步 §2.2 / §9.5 / §12.2 / §18.4.1 / ADR-31 |**（v3.3 再修订，见 ADR-32）本条的 `HarnessAgent` 只是「当前默认实现」的一种装配，不是平台契约**：平台只依赖 `AgentRuntimePort`，换实现不改其它服务节点。
 | ADR-19 | 技能与接口权限 | 技能=独立授权单元：角色配技能（role_skill）即获得该技能声明接口（skill_api，发布审核 approved）的使用资格；角色可用接口 = Σ(配置技能的 skill_api) ∪ 直配接口（role_api 承载角色直配接口）——并集模型，避免双重配置。技能执行运行时不设独立人工审批节点：高危管控前移为「发布时接口绑定一次审核 + write 接口默认不对技能开放 + 执行器/沙箱隔离 + 数据级过滤兜底 + 全链路审计」。控制节点分层：A 技能可见性注入(体验) / B 技能触发鉴权(强制) / C 执行器白名单(代码层) / E 接口调用鉴权(强制) / F 数据级过滤(兜底)。骨架期不实现，仅定契约（后置） |
-| ADR-20 | 服务架构定稿（2026-09-10，§18，含 v2.5 冲突对齐） | data-gateway 为数据面唯一通道（接口服务/沙箱只在内网、只接受网关）；技能=包（manifest + playbook + 脚本 + 接口绑定）由 skill-execution-service 执行、脚本在 sandbox-runner 隔离运行（**容器无 DB 凭据、无网卡；出网只发生在宿主代理，由代理代调取数**——见 ADR-34）；跨服务身份与数据范围由**网关单点判定后下发给接口服务**、接口服务直接使用（**修订见 §20.1 / ADR-22 / ADR-23**：信任内网隔离、不查权限库；服务间以 API Key + 共享密钥 + HMAC 请求签名防伪防篡改，接口服务验签但不重新判定，剩余风险明示）；沙箱数据令牌保留（**由宿主代理持有、不进入容器**，见 ADR-34）；工件与血缘作为顺序确定性依据；写接口（OSS 上传）发布审核绑定 + 运行时 HITL（confirmId）；权限判定函数收敛在 common 共享库、骨架期零缓存直查 PG；E = 网关 G3 单点判定（下发身份与范围），F 仅在接口服务 I4；技能执行超 30s 转异步 job（jobId + poll + 挂起恢复）**（已由 ADR-23 修订：服务间新增 API Key + 共享密钥 + HMAC 请求签名，接口服务验签但不重新判定）** |
-| ADR-21 | 契约与状态机定稿（2026-09-12，§19） | 新增 §19 为唯一契约源；**修订 ADR-20**：骨架期不引入 ACT（进一步由 ADR-22 调整为网关单点判定 + 接口服务信任下发）；确认（HITL）前移到技能启动前一次确认、技能内不再打断；capabilities 由网关提供；技能/接口只用最新版不做版本并存；先写库再投递为强制路径；挂起用 AgentStateStore 落 PG；产物保留期 7 天替代任务超时；技能执行服务骨架期内嵌 agent-service 并按模块边界写死；章节编号统一为「章号.序号」 **（其中「先写库再投递为强制路径」已由 ADR-25 修订为「先入队、消费端攒批落库」，再经 ADR-28 修订为「先写本地 append-only 日志再投递」）** |
+| ADR-20 | 服务架构定稿（2026-09-10，§18，含 v2.5 冲突对齐） | data-gateway 为数据面唯一通道（接口服务/沙箱只在内网、只接受网关）；技能=包（manifest + playbook + 脚本 + 接口绑定）由 skill-execution-service 执行、脚本在 sandbox-runner 隔离运行（**容器无 DB 凭据、无网卡；出网只发生在宿主代理，由代理代调取数**——见 ADR-34）；跨服务身份与数据范围由**网关单点判定后下发给接口服务**、接口服务直接使用（**修订见 §20.1 / ADR-22 / ADR-23**：信任内网隔离、不查权限库；服务间以 API Key + 共享密钥 + HMAC 请求签名防伪防篡改，接口服务验签但不重新判定，剩余风险明示）；沙箱数据令牌保留（**由宿主代理持有、不进入容器**，见 ADR-34）；工件与血缘作为顺序确定性依据；写接口（OSS 上传）发布审核绑定 + 运行时 HITL（confirmId）；权限判定函数收敛在 common 共享库、骨架期零缓存直查 PG；E = 网关 G3 单点判定（下发身份与范围），F 仅在接口服务 I4；技能执行超 30s 转异步 job（jobId + poll + 挂起恢复）**（已由 ADR-23 修订：服务间新增 API Key + 共享密钥 + HMAC 请求签名，接口服务验签但不重新判定）** **（再经 ADR-37 修订）** 其中「跨服务身份与数据范围由网关单点判定后下发」改为：网关只判定**接口可用性**并下发身份（`userId + requestId`），**数据范围不下发**，由接口服务基于登录人自行推导。 |
+| ADR-21 | 契约与状态机定稿（2026-09-12，§19） | 新增 §19 为唯一契约源；**修订 ADR-20**：骨架期不引入 ACT（进一步由 ADR-22 调整为网关单点判定 + 接口服务信任下发）；确认（HITL）前移到技能启动前一次确认、技能内不再打断；capabilities 由网关提供；技能/接口只用最新版不做版本并存；先写库再投递为强制路径；挂起用 AgentStateStore 落 PG；产物保留期 7 天替代任务超时；技能执行服务骨架期内嵌 agent-service 并按模块边界写死；章节编号统一为「章号.序号」 **（其中「先写库再投递为强制路径」已由 ADR-25 修订为「先入队、消费端攒批落库」，再经 ADR-28 修订为「先写本地 append-only 日志再投递」）** （后续再经 **ADR-37** 修订：网关只判定接口可用性并下发身份，**数据范围不下发**，由接口服务基于登录人自行推导） |
 | ADR-22 | 安全与运维契约定稿（2026-09-12，§20） | 类型三定稿：**信任边界改为网关单点判定**（网关下发 userId+scope，接口服务不二次校验、不再查权限库；**明示接受内网失守时被冒充的风险**，网络策略默认全拒，自动化可达性探测骨架期不做）；每人 + 全局日用量上限（超限只拒新对话、不打断进行中）；服务发现骨架期用固定配置；审计以接口服务 I6 为数据访问权威源；不删除、长期保留（归档与召回后置）；思考流用户个人可选（默认步骤卡 / 可选 DeepSeek 推理原文）；新增 config_audit；Flyway 迁移；沙箱骨架期假设脚本可信；降级元数据接口与 SSE 连接治理后置 **（已由 ADR-23 修订：撤销「骨架期无服务间验签 / 应用层无第二道校验」，改为服务间 API Key + 共享密钥 + HMAC 签名 + 时间窗 + nonce 防重放）** |
-| ADR-23 | 服务间防伪防篡改 + 数据范围并集（2026-09-18，§20.1 / §19.1） | **修订 ADR-20 / ADR-22**：① 网关与内部服务之间的每一跳新增**服务间防伪与防篡改**——调用方持 `X-Api-Key`（keyId）+ 共享密钥，对「方法 + 路径 + query + 时间戳 + nonce + 请求体 SHA-256 摘要」做 **HMAC-SHA256** 签名（`X-Signature`）；接收方按 keyId 取密钥重算比对、±300s 时间窗、nonce 一次性（Redis SETNX + TTL）防重放；失败统一 401 + 审计告警；密钥不进 URL / 日志 / Trace，按 keyId 支持双密钥轮换；沙箱侧密钥只由宿主代理持有、脚本不可见。**验签只证明「请求来自可信服务且未被篡改」，不替代网关单点判定**：`apiSet` / `scopeFor` 仍只在网关推导，接口服务不查权限库、不回查网关、不重算。② 数据范围口径由「多角色取严交集」改为**多角色并集**：`scopeFor(user, skill, api)` = 各角色对该接口授权范围的并集（角色直配 `role_api.scope` 优先，无直配时取该角色经技能获得的技能声明范围；无任何授权来源 → 403）；授权与数据范围口径统一为并集。**（② 的「技能声明范围」这一来源已由 ADR-26 修订：技能不再携带范围，范围只在 `role_api.scope`）** |
+| ADR-23 | 服务间防伪防篡改 + 数据范围并集（2026-09-18，§20.1 / §19.1） | **修订 ADR-20 / ADR-22**：① 网关与内部服务之间的每一跳新增**服务间防伪与防篡改**——调用方持 `X-Api-Key`（keyId）+ 共享密钥，对「方法 + 路径 + query + 时间戳 + nonce + 请求体 SHA-256 摘要」做 **HMAC-SHA256** 签名（`X-Signature`）；接收方按 keyId 取密钥重算比对、±300s 时间窗、nonce 一次性（Redis SETNX + TTL）防重放；失败统一 401 + 审计告警；密钥不进 URL / 日志 / Trace，按 keyId 支持双密钥轮换；沙箱侧密钥只由宿主代理持有、脚本不可见。**验签只证明「请求来自可信服务且未被篡改」，不替代网关单点判定**：`apiSet` / `scopeFor` 仍只在网关推导，接口服务不查权限库、不回查网关、不重算。② 数据范围口径由「多角色取严交集」改为**多角色并集**：`scopeFor(user, skill, api)` = 各角色对该接口授权范围的并集（角色直配 `role_api.scope` 优先，无直配时取该角色经技能获得的技能声明范围；无任何授权来源 → 403）；授权与数据范围口径统一为并集。**（② 的「技能声明范围」这一来源已由 ADR-26 修订：技能不再携带范围，范围只在 `role_api.scope`）** **（再经 ADR-37 修订）** ① 中「`apiSet` / `scopeFor` 仍只在网关推导」改为：网关只判定 **`apiSet`（接口可用性）**，**`scopeFor` 由接口服务基于登录人自行推导**、不再由网关计算与下发；② 的「范围只在 `role_api.scope`」作废（该列 V13 已 DROP）。 |
 | ADR-24 | 数字一致性校验改为「台账 + 算式复算」（2026-09-18，§6.2 / §6.3） | **修订 ADR-07**：不做「从答案文本里抠数字 ↔ 工具结果比对」（严格包含判定会误杀「下降了 12%」这类正当派生数字；用正则抠自然语言数字还会误判「三甲 / 第 2 季度 / 2026 年」）。改为：① 工具/技能返回的每个数字由程序编号登记成**数字台账**（编号 / 数值 / 单位 / metricKey / timeRange / 口径 / 来源 apiId）；② 模型结构化交出 `answer` + `figures[]`（台账编号）+ `expressions[]`（表达式只允许编号 + 白名单算子，不许字面常量）；③ 程序按算子白名单（`+ - × ÷`、求和/平均/最大/最小/计数、占比/环比/同比/差额/百分点差）用 `BigDecimal` 复算、容差取字典 `rounding` 精度下最后一位的半个单位、单位先按 `unit_convert` 归一再算，**不引入通用表达式引擎、不用 `eval`、不做正则抠数**；④ 一致 → 放行并**把计算过程 + 原始数据一并展示**给用户；不一致 / 引用不存在的编号 / 答案中有台账与算式都覆盖不到的数字 → **降级**为「只展示接口原始数据 + 口径标注」并计 `hallucination_blocked`（不硬拦、不静默改数）；⑤ 高频、有明确口径的派生（同比/环比/占比/TOP N 合计）由接口服务按字典 `derived_of` **直接算好返回**，模型只引用编号；⑥ 分母为 0 / 样本低于阈值 → 输出「无法计算」，禁止 `∞ / NaN`；⑦ 纯定性回答（无数字）放行但计入「无数字断言占比」跑偏信号。落点同步 §0.3 / §0.5 / §2.2 / §3.4 / §3.5 / §6.1–§6.5 / §10.4 / §12.2 / §14 / §16-2 / §18.4.1 P6 / §18.5.5 |
 | ADR-25 | 落库口径：先入队、消费端攒批落库（2026-09-18，§19.6 / §8.4 / §8.3） | **修订 ADR-21 / ADR-22 中「先写库再投递为强制路径」**：① 会话与步骤数据改为**先入 Redis Stream、消费端（`event-persist`）按「50 条 / 100ms」攒批写入 PG 事实表**，用户等待路径上不落库；② 以 `event_id` 唯一键 + `ON CONFLICT DO NOTHING` 保幂等，失败重试 5 次进 `event_dead_letter` 并告警，消费滞后（>1 万条 / >5s）与死信数一律告警；③ **明确接受**「消费者写库前 Redis 是唯一副本」这一丢失窗口（后果＝某次回放不完整；**不涉及合规审计**——`permission_audit` 与接口服务 I6 直写 PG、一条不漏）；④ Redis 独立部署 + AOF + `noeviction` + `MAXLEN ~ 100 万`；⑤ **本地 WAL 追赶重放列为后置演进路线**（骨架期不实现，接入真实数据前必须补齐）；⑥ 事实表补 `event_id`，时间列统一 `created_at timestamptz`、主键带 `created_at`、查询带时间范围，为月分区留口子（§20.5）。落点同步 §0.3-3 / §2.3 / §8.3 / §8.4 / §10.2 / §13 / §14-8 / §16-5 / §17 / §19.6 / §19.13。**（本 ADR 的「已接受的丢失窗口 / 先入队」口径已由 ADR-28 修订：事件先追加写本地 append-only 日志（唯一事实源）再投递，Redis / MQ 降级为落库通道，事件不得消失）** |
-| ADR-26 | 数据范围简化 + 全局无状态硬约束（2026-09-18，§4.6–§4.10 / §6.6 / §19.1 / §19.4 / §2.3） | **修订 ADR-23** 的 ②（其中「无直配时取技能声明范围」不再存在）：① **删掉通用 `scope` 操作符字典与「技能声明范围」**——数据范围**只在 `role_api.scope` 一处**承载（该角色可见的业务对象集合），技能只给「可调用哪些接口」的资格、不携带任何范围；范围 → SQL 由**接口服务**按业务表的归属字段（如 `doctor.owner_id`）拼 WHERE，权限模块不认识业务表结构；**fail-closed**：范围缺失 / 解析失败 / 无任何授权来源 → 403，绝不当「全部」。② `role_skill` 收敛为单字段 `can_view`（**可见即可执行**：可见就等于可调用，不拆 `can_view` / `can_invoke` 两个字段）；删 `role_api.is_read_only`；`sys_api.method` 明确为**副作用等级而非权限**（只决定确认 / 重试 / 审计 / 超时）。③ **全局硬约束「无状态 / 可水平扩展 / 不允许单点」**：任何服务不持有会话 / 任务等业务状态（状态一律外置 PG / Redis），计数一律 Redis 原子计数（禁止本地内存计数），定时任务与投递器用分布式锁互斥，网关与各入口可多副本。④ **时间口径**新增 §6.6（业务时区 `Asia/Shanghai`、DB 存 UTC `timestamptz`、区间左闭右开 `[起,止)`、相对时间由程序解析），口径字典加 `timezone`。⑤ **JWT 有效期 ≤15 分钟** + refresh token + 网关每请求查 `sys_user.status`（停用 / 离职立即生效；角色变更最多 15 分钟延迟生效；**不引入 token 版本号**）。⑥ **表分区 / 冷热分层列为后置路线**，骨架期只留三个零成本口子（`created_at timestamptz` / 主键带 `created_at` / 查询带时间范围）（§20.5 / §8.3）。落点同步 §0.3-8/9 / §2.3 / §4.1 / §4.6–§4.10 / §6.6 / §9.3 / §13 / §17 / §18.4.2 / §19.1 / §19.4 / §19.13 / §20.12 |
+| ADR-26 | 数据范围简化 + 全局无状态硬约束（2026-09-18，§4.6–§4.10 / §6.6 / §19.1 / §19.4 / §2.3） | **修订 ADR-23** 的 ②（其中「无直配时取技能声明范围」不再存在）：① **删掉通用 `scope` 操作符字典与「技能声明范围」**——数据范围**只在 `role_api.scope` 一处**承载（该角色可见的业务对象集合），技能只给「可调用哪些接口」的资格、不携带任何范围；范围 → SQL 由**接口服务**按业务表的归属字段（如 `doctor.owner_id`）拼 WHERE，权限模块不认识业务表结构；**fail-closed**：范围缺失 / 解析失败 / 无任何授权来源 → 403，绝不当「全部」。② `role_skill` 收敛为单字段 `can_view`（**可见即可执行**：可见就等于可调用，不拆 `can_view` / `can_invoke` 两个字段）；删 `role_api.is_read_only`；`sys_api.method` 明确为**副作用等级而非权限**（只决定确认 / 重试 / 审计 / 超时）。③ **全局硬约束「无状态 / 可水平扩展 / 不允许单点」**：任何服务不持有会话 / 任务等业务状态（状态一律外置 PG / Redis），计数一律 Redis 原子计数（禁止本地内存计数），定时任务与投递器用分布式锁互斥，网关与各入口可多副本。④ **时间口径**新增 §6.6（业务时区 `Asia/Shanghai`、DB 存 UTC `timestamptz`、区间左闭右开 `[起,止)`、相对时间由程序解析），口径字典加 `timezone`。⑤ **JWT 有效期 ≤15 分钟** + refresh token + 网关每请求查 `sys_user.status`（停用 / 离职立即生效；角色变更最多 15 分钟延迟生效；**不引入 token 版本号**）。⑥ **表分区 / 冷热分层列为后置路线**，骨架期只留三个零成本口子（`created_at timestamptz` / 主键带 `created_at` / 查询带时间范围）（§20.5 / §8.3）。落点同步 §0.3-8/9 / §2.3 / §4.1 / §4.6–§4.10 / §6.6 / §9.3 / §13 / §17 / §18.4.2 / §19.1 / §19.4 / §19.13 / §20.12 **（再经 ADR-37 修订）** ① 中「数据范围只在 `role_api.scope` 一处承载」作废：`role_api.scope` 与 `sys_api.column_whitelist` 均已在 V13 DROP，范围改由**接口服务基于登录人自行推导**；其余（技能只给接口资格、fail-closed、无状态硬约束）不变。 |
 | ADR-27 | 复用 AgentScope 内置能力，不重复实现（2026-09-19，§4.8 / §10.1 / §12.2 / §18.4.1） | **ADR-27 本身不改选型；ADR-01 不变，ADR-18 的装配外壳已由 v3.3 二次修订（见 ADR-18 / ADR-31）。本条禁止重复实现框架已有能力**：① **权限**——工具闸门一律用 `io.agentscope.core.permission`（在 **agentscope-core**，非 harness）：`PermissionRule`（`ALLOW` / `DENY` / `ASK` / `PASSTHROUGH`，规则优先级最高）+ `PermissionMode`（`DEFAULT` / `ACCEPT_EDITS` / `EXPLORE` / `BYPASS` / `DONT_ASK`）+ **`ToolBase#checkPermissions` 运行时内置检查（不被 mode / rule 覆盖，是「不可绕过」的真实来源）**〔**该表述已由 ADR-32 ④ 修订：它只决定「工具要不要执行 / 要不要问用户」，数据级授权的底线在平台 `ToolInvoker` 唯一出口 + 网关 `G3` + 接口服务 `F`（详见本行末）**〕。映射：**A** = Toolkit 只注册 visibleTools + `EXPLORE` 兜底（写类工具 DENY）；**B** = 技能工具挂 DENY/ASK 规则 + 技能入口 `canTrigger` 二次校验（§4.6 节点 B 逻辑不变）；**C** = 受限子 agent 的工具清单由代码生成（不依赖规则）；**E** = 注册到工具上的规则集 + 框架内置检查（**网关 G3 仍是唯一授权判定**，规则只是同一结论在 agent 侧的执行形态）；**F** = 不变，仍在接口服务（框架不接管数据层，§20.1.6-3 不受影响）。② **事件**——§12.2 的 SSE 事件表是**业务投影层**，底层必须由框架 typed event 派生（`REQUIRE_USER_CONFIRM` / `USER_CONFIRM_RESULT` / `REQUIRE_EXTERNAL_EXECUTION` / `EXTERNAL_EXECUTION_RESULT` / `ALL_TOOLS_DENIED` / `SUBAGENT_EXPOSED` / `EXCEED_MAX_ITERS` / `REQUEST_STOP` / `HINT_BLOCK` / `CUSTOM`），子 agent 归属用事件的 `source`（如 `main/researcher`），业务事件（`skill_start` / `artifact` / `sandbox_job`）用 `CUSTOM` 承载。③ **横切**——P1 / P2 / P6、审计、成本计数一律以 `MiddlewareBase` 五钩子（`onAgent` / `onReasoning` / `onActing` / `onModelCall` / `onSystemPrompt`）实现，不再新增 Graph 节点；`onSystemPrompt` 是 Transformer（链式改写），作为「固定前缀 + 尾部 delta」的落点。④ **Trace**——用框架自带的 OTel tracing 中间件，业务 span 名（P/G/S/I/W）保留用于回放对号，同时必须挂载 `gen_ai.*` 标准属性（OpenTelemetry GenAI 语义约定）。**冲突处理**：仅当框架能力与本文档契约冲突（如 F 必须在接口服务、权限判定必须单点）时才允许自研，且必须写 ADR 记录「冲突点 + 补偿措施 + 回归用例」；harness 侧能力（Plan Mode / Skill 包 / Sandbox / Channel / Compaction）**骨架期仍不启用**，但契约必须对齐，并在 §15 路线里优先切框架实现。**（v3.3 扩充）⑤ 平台能力同样复用 `agentscope-extensions` 官方模块，不自研**：状态持久化用 `PostgresAgentStateStore` / `RedisAgentStateStore`（Jedis / Redisson / Lettuce）与 `PostgresDistributedStore`；技能仓库用 `agentscope-extensions-skill-postgresql-repository`（另有 Git / MySQL / Nacos / classpath 后端）；异步 job 用 `agentscope-extensions-scheduler`（Quartz / XXL-Job）；工件对象存储用 `agentscope-extensions-oss`；沙箱评估 harness `DockerSandbox`（含快照与恢复）。⑥ **流式协议**：`agentscope-agui-spring-boot-starter`（AG-UI，WebFlux + MVC）是否替换 §12.2 自研事件层，列为 M1 调研项，**不做无条件切换**（须先确认能否承载证据等级 / 口径标注等业务语义）；在此之前 §12.2 仍是唯一事件契约源。**（v3.3 再修订，见 ADR-32）**：④ 的链路改为「框架 typed event → 中立 `AgentEvent`（§8.4）→ §12.2 投影」；① 中「不可绕过的真实来源」**从框架的 `ToolBase#checkPermissions` 移回平台侧**——`ToolInvoker` 唯一出口 + 网关 G3 + 接口服务 F 才是底线，框架权限系统降级为**该实现内部的第二道纵深防御**（否则换框架就换掉了安全边界）；选型措辞改为「默认实现可替换」。落点同步 §0.3-11 / §4.8 / §10.1 / §12.2 / §14-5 / §17 / §18.4.1 / ADR-18 / ADR-31 |
 | ADR-28 | 会话日志先行：append-only 日志是唯一事实源（2026-09-19，§19.6 / §8.3 / §8.4 / §16-5） | **修订 ADR-25（回归 ADR-21 / ADR-22「先落地再投递」的精神，但改为「先写日志」）**：① 事件路径改为**先追加写本地 append-only 日志**（`/data/eventlog/agent-{instanceId}.jsonl`，按批 `fsync`，**必须挂真实卷**；启动时校验卷可用，不可用则**拒绝启动**）→ 再 `XADD` 投递 → 消费端攒批落库 → 投递确认后按保留窗口（默认 24h，可配）裁剪；② **删掉「已接受的丢失窗口」**——事件**不得消失**，Redis / 消费者故障只允许造成 **PG 滞后**（仍允许 ≤1 秒落库延迟），进程重启时扫描日志把「投递未确认」事件重新入队（`event_id` 幂等，重放安全）；Redis 不可用时**继续写本地日志 + 计数告警**，不丢弃、不静默；③ **「模型可见即落库」**——进入模型请求的 System Prompt 片段 / 工具 schema / 工具结果 / 注入提醒必须能从日志重建，运行期断言违规即告警；④ 历史 / 回放 / 断线续传 / 评估 / **fork-resume** 一律从日志派生（PG 事实表是查询视图，不是事实源）；⑤ 观测新增「本地日志未投递积压（条数 + 最早未确认时间）」与磁盘水位告警（§10.2）。落点同步 §0.3-3/10 / §2.3 / §8.3 / §8.4 / §10.2 / §14-8 / §16-5 / §17 / §19.6 / §19.13 |
 | ADR-29 | 工具执行管线五段：PRE / GUARD / EXECUTE / POST / RESULT（2026-09-19，§9.5 / §9.1 / §10.4 / §18.4.3 S4 / §19.9） | **所有工具调用（`iface_*` / `skill_*` / `py_*` / 平台内置工具）必须走唯一执行管线，唯一执行面定义见新增 §9.5**；不得在技能服务、接口服务或技能脚本里另立特例。**五段职责**：PRE = 放行 / 拒绝 / 发起询问（`ASK`）/ 改写本次调用参数；**GUARD = 只能拒绝或弃权（单调收紧，没有「放行」权力）**；EXECUTE = 环绕包裹（超时 / 只读幂等重试 / 耗时与 token 打点，不判权限）；POST = 结果级处置（接受 / 拦截 / 替换结果 / 追加提醒上下文）；RESULT = 只读观察（台账登记 / 审计落库 / SSE 投影）。**为什么 GUARD 独立于 PRE**：写进 PRE 的约束会被后续钩子的参数改写或组合放行抵消，只有单调守卫能保证「无论前面怎么放行，这里一票否决」——配额、越权收紧、重复调用熔断、写次数上限一律写 GUARD。**实现落点**：`common/toolpipeline/`（`ToolStage` / `ToolPreHook` / `ToolGuard` / `ToolPostHook` / `ToolInvocation` / `ToolOutcome`）+ `agent-service/agent/tool/ToolPipelineRunner`（唯一引擎，`@Order` 定序）+ `ToolPipelineMiddleware implements MiddlewareBase`（挂 `onActing`）。**通道适配器（硬要求）**：AgentScope 文档明确 `onActing` **不追踪 external execution**，而本设计的技能调用与沙箱 job 正是 external execution——**必须同时订阅 `REQUIRE_EXTERNAL_EXECUTION` / `EXTERNAL_EXECUTION_RESULT`，把外部通道映射进同一条五段管线**；否则技能链路绕开管线、§10.4 拦截与 §6.2 台账登记全部失效。**最小落地顺序**：M1 放 `ToolExecutor` + `AuditPostHook`（行为不变，用 Trace 对数验证覆盖 100%）→ `SpillPostHook`（删除 §18.4.3 S4 技能内特例）→ `ConfirmPreHook` + `NumberLedgerHook` → `ToolGuard`（§10.4 从统计改为拦截）。落点同步 §9.1 / §9.5 / §10.4 / §18.4.1 / §18.4.3 S4 / §19.9 |**（v3.3 再修订，见 ADR-32）本管线位于平台 core，不在运行时适配器内**：运行时不执行任何工具，只把调用委派给平台 `ToolInvoker`；因此上文的「通道适配器」是**适配器实现方的义务**，不是管线的一部分。
 | ADR-30 | 编排职责边界：Graph 与 Middleware 各管一层（2026-09-19，§5.1 / §5.4 / §18.4.1） | **补齐 ADR-01（Graph）+ ADR-27（Middleware）之间的职责分割，禁止两套逻辑并存与双写**：① **Graph 只承担「跨请求、跨进程、可恢复」的业务流程**——HITL interrupt / 检查点（§5.4 / §19.9）、ContextSnapshot 装配与状态机（§5.1，检查点落 PG）、选路与降级分支（§18.4.1 P3）、审计锚点 `requestId`；② **单次 `call` 内的横切一律 Middleware**——审计埋点、成本计数、数字台账、Trace 属性、系统提示词拼装（`onSystemPrompt` 的「固定前缀 + 尾部 delta」）、工具执行管线（ADR-29）；**判据一句话**：这次 `call` 结束就没了 → Middleware；换个请求、换台机器还得接着跑 → Graph；③ **事实源唯一**：append-only 会话日志是唯一事实源（ADR-28），**Graph 检查点与 `AgentStateStore` 都是派生视图 / 缓存**，不得各自成为第二真相；④ **对话内 HITL 可用框架事件替代 Graph interrupt**（`REQUIRE_USER_CONFIRM` → `USER_CONFIRM_RESULT` 回灌下一次 `call`），但**跨小时 / 跨进程的异步 job 挂起恢复仍必须由外层编排承担**；⑤ **骨架期坦白**：因 ADR-15（仅慢路径、意图节点空占位），Graph 当下近乎空壳，其价值是「预留扩展位 + HITL 承载」；**保留决定不变**。落点同步 §5.1 / §5.4 / §9.5 / §18.4.1 / §19.6 / §19.9 |
 | ADR-31 | HarnessAgent 装配基线（2026-09-19，§2.2 / §9.5 / §12.2 / §18.4.1） | **配合 ADR-18 二次修订**：骨架期以 `HarnessAgent` 作为装配外壳，装法与开关清单如下（理由：本设计第一原则是「agent 不碰数据、不碰权限明细」，文件与命令能力在医疗数据场景属于新增外泄面）。① **基线关闭**（`disableXxx`）：`disableFilesystemTools()` / `disableShellTool()` / `disableMemoryTools()` / `disableMemoryHooks()` / `disableWorkspaceContext()` / `disableSubagents()` / `disableToolsConfig()`；② **必须显式给**（否则框架默认值替你决定）：`stateStore(new PostgresAgentStateStore(...))`、`workspace(...)`、`permissionContext(...)`（ADR-27 规则集）、`middleware(new ToolPipelineMiddleware(...))`（ADR-29）；③ **按需开启**：`compaction(...)`、`skillRepository(...)`（骨架期可不启）；④ **一个取舍**：`toolResultEviction` 的占位符语义依赖 `read_file` 工具，与 `disableFilesystemTools()` 直接冲突——**本设计不采用框架 eviction，改用 §9.5 POST 段的 spill 到 MinIO + 平台可控 locator**（§18.4.3 S4）；⑤ **待验证项（M1）**：`agentscope-agui-spring-boot-starter`（AG-UI）能否承载 §12.2 的业务语义（证据等级 / 口径标注），验证通过才替换自研事件层。落点同步 §2.2 / §9.5 / §12.2 / §18.4.1 / §18.4.3 / §19.9 |**（v3.3 再修订，见 ADR-32）本条描述的是「当前默认实现」的装配基线**；平台只依赖 `AgentRuntimePort`，换实现时本节随之失效、其余服务不受影响。另：正因为基线关闭了文件 / Shell / 记忆工具，**运行时侧不存在需要自己执行的工具**，全部工具才能统一按「外部执行」委派给平台 `ToolInvoker`（ADR-32 不变量 1）。
-| ADR-32 | agent 运行时端口：agent 节点可插拔（2026-09-19，§18.10 / §0.3-14 / §9.5 / §19.14） | **新增设定：agent 运行时必须可替换，且替换不得影响任何其它服务节点**。① **端口**——新增 `common/agent-spi`（**禁止 import 任何框架包**）：`AgentRuntimePort`（`id` / `version` / `capabilities` / `start` / `stream` / `confirm` / `cancel` / `snapshot` / `resume` / `close`）+ 中立模型（`AgentRunRequest` / `AgentEvent` / `AgentSession` / `Snapshot` / `ConfirmDecision` / `AgentBudgets` / `RuntimeCapabilities`）+ 回调 SPI（`ToolCatalog` / `ToolInvoker` / `RuntimeStatePort` / `EventPublisher` / `LedgerPort`）。② **依赖方向**——`agent-service/core → agent-spi ← agent-service/runtime/runtime-<vendor>`，core 与 runtime **互不依赖**；换实现只换 module + 一行配置 `agent.runtime=<id>`；仓库结构见 §0.4。③ **三条不变量**——**工具调用 100% 经平台 `ToolInvoker`**（运行时不得持有数据面凭据、不得直连 data-gateway）、**事件 100% 以中立 `AgentEvent` 上报**、**状态必须可导出为 `Snapshot` 并可恢复**。④ **安全边界的归属修正（修订 ADR-27）**——「不可绕过」**不再依赖框架的 `ToolBase#checkPermissions`**；底线回到平台侧（`ToolInvoker` 唯一出口 + 网关 G3 + 接口服务 F），框架权限系统降级为**该实现内部的第二道纵深防御**（否则换框架就等于换掉安全边界）。⑤ **管线归属（修订 ADR-29 / 澄清 ADR-31）**——§9.5 五段管线在**平台 core**；ADR-31 关闭文件 / Shell / 记忆工具后，**运行时侧不存在需要自己执行的工具**，全部工具统一按「外部执行」委派给 `ToolInvoker`，管线 / 权限 / 审计 / 台账天然跨实现。⑥ **会话绑定**——会话记录存 `runtime_id` / `runtime_version`，**不允许跨运行时恢复同一会话**（§19.14）。⑦ **准入门槛**——新实现必须先通过**契约回归（TCK）**（权限拒绝 / HITL 往返 / 取消 / 超步数 / 快照恢复 / 事件顺序 / 工具调用全走 `ToolInvoker` / 成本上报 / 错误归一化）才允许上线（§16-9）。⑧ **不做最小公分母抽象**——框架特有增强走 `RuntimeCapabilities` 声明与降级，不阻塞。落点同步 §0.3-14 / §0.4 / §8.4 / §9.5 / §10.1 / §16-9 / §17 / §18.4.1 / §18.10 / §19.14 |
+| ADR-32 | agent 运行时端口：agent 节点可插拔（2026-09-19，§18.10 / §0.3-14 / §9.5 / §19.14） | **新增设定：agent 运行时必须可替换，且替换不得影响任何其它服务节点**。① **端口**——新增 `common/agent-spi`（**禁止 import 任何框架包**）：`AgentRuntimePort`（`id` / `version` / `capabilities` / `start` / `stream` / `confirm` / `cancel` / `snapshot` / `resume` / `close`）+ 中立模型（`AgentRunRequest` / `AgentEvent` / `AgentSession` / `Snapshot` / `ConfirmDecision` / `AgentBudgets` / `RuntimeCapabilities`）+ 回调 SPI（`ToolCatalog` / `ToolInvoker` / `PlatformTurnStore` / `EventPublisher` / `LedgerPort`）。② **依赖方向**——`agent-service/core → agent-spi ← agent-service/runtime/runtime-<vendor>`，core 与 runtime **互不依赖**；换实现只换 module + 一行配置 `agent.runtime=<id>`；仓库结构见 §0.4。③ **三条不变量**——**工具调用 100% 经平台 `ToolInvoker`**（运行时不得持有数据面凭据、不得直连 data-gateway）、**事件 100% 以中立 `AgentEvent` 上报**、**状态必须可导出为 `Snapshot` 并可恢复**。④ **安全边界的归属修正（修订 ADR-27）**——「不可绕过」**不再依赖框架的 `ToolBase#checkPermissions`**；底线回到平台侧（`ToolInvoker` 唯一出口 + 网关 G3 + 接口服务 F），框架权限系统降级为**该实现内部的第二道纵深防御**（否则换框架就等于换掉安全边界）。⑤ **管线归属（修订 ADR-29 / 澄清 ADR-31）**——§9.5 五段管线在**平台 core**；ADR-31 关闭文件 / Shell / 记忆工具后，**运行时侧不存在需要自己执行的工具**，全部工具统一按「外部执行」委派给 `ToolInvoker`，管线 / 权限 / 审计 / 台账天然跨实现。⑥ **会话绑定**——会话记录存 `runtime_id` / `runtime_version`，**不允许跨运行时恢复同一会话**（§19.14）。⑦ **准入门槛**——新实现必须先通过**契约回归（TCK）**（权限拒绝 / HITL 往返 / 取消 / 超步数 / 快照恢复 / 事件顺序 / 工具调用全走 `ToolInvoker` / 成本上报 / 错误归一化）才允许上线（§16-9）。⑧ **不做最小公分母抽象**——框架特有增强走 `RuntimeCapabilities` 声明与降级，不阻塞。落点同步 §0.3-14 / §0.4 / §8.4 / §9.5 / §10.1 / §16-9 / §17 / §18.4.1 / §18.10 / §19.14 |
 | ADR-33 | 用户自建技能与脚本的执行归属（2026-09-19，§18.12 / §0.3-15 / §4.6 / §9.5 / §16-10） | **技能的「定义」可以下放给用户，技能的「执行」必须留在平台侧沙箱**。① **为什么必须定这条**——`HarnessAgent` 原生具备用户自建技能与脚本执行能力（`SkillManageTool` / `ProposeSkillTool` 可按 `RuntimeContext` 读写每用户技能目录，`ShellExecuteTool` 负责执行），**但其默认文件系统是 `LocalFilesystemSpec → LocalFilesystemWithShell`，命令以 `sh -c` 直接跑在应用服务器上**（框架类注释原文：`without any sandboxing, process isolation, or security restrictions`），且 `disableShellTool` 默认 `false`——**默认配置等于让终端用户在你的服务器上以应用进程权限执行任意脚本**，与本文档的权限底线直接冲突。② **定义侧（可下放）**——用户技能只能写入自己的命名空间（`IsolationScope.USER`：`NamespaceFactory` 路径前缀 = `userId`，沙箱侧由 `SandboxIsolationKey` 决定 slot）；技能**存储与审批归 management-service / 技能仓库**（§18.4.6 / §18.5.2），用户只能提草稿、过审批闸后发布，**不得自动发布**；`agent-service` 只投影「该用户可见 / 可触发的技能」（§4.6 的 `viewableSkills` / `canTrigger`），不直接读写用户技能目录。③ **执行侧（不下放）**——用户脚本一律交平台 `skill-execution-service` + `sandbox-runner`，且**必须落在 §9.5 管线的 EXECUTE 段之内**（超时、幂等重试、耗时与 token 打点、审计、台账统一在此段完成）。**ADR-31 基线保持不变**（`disableFilesystemTools()` / `disableShellTool()`），运行时侧不执行任何工具。④ **将来要开「运行时侧执行」的破例条件**——必须**同时**满足：沙箱后端（Docker / Kubernetes / E2B / AgentRun / Daytona，**禁用默认 local**）、`isolationScope(USER)`、`network("none")`、CPU 与内存上限、`additionalRunArgs` 加固（非 root、`--cap-drop ALL`、`no-new-privileges`、只读根 + tmpfs）、**不 bind 宿主目录、不挂 `docker.sock`**、`workspaceProjectionRoots` 与宿主 workspace 均按用户隔离；并且因为 `ShellExecuteTool` 在适配器内本地执行、**不经平台 `ToolInvoker`**，会破坏 ADR-32 的不变量①③，**必须另写 ADR 记录例外与补偿**（否则 §16-9 的 TCK 第 10 条直接不成立）。⑤ **红线与不可达资源清单**（详见 §18.12.5）——用户脚本的触达范围**有且只有**「容器内临时环境 + 本用户工作区」：宿主其它路径、其它用户的沙箱与工作区、同一宿主上的其它容器、宿主 Docker、平台内部服务（网关 / 接口服务 / PG / Redis / MinIO）、云元数据服务、公网**一律不可达**；**跨用户自定义技能必须不可见、不可列举、不可触发、不可装载**；不挂宿主目录 / `docker.sock`；共享 workspace 不得投影进用户沙箱；不以 `SkillSecurityScanner` 作为安全边界。 |
 | ADR-34 | 沙箱取数通道：容器无网络 + 宿主代理代调（2026-09-19，§18.1.3 / §18.4.3 S5 / §18.4.4 / §18.5.1 / §18.5.2 / §20.1.5 / §20.9） | **修订 ADR-20 中「脚本在沙箱内运行、出网仅网关 + 脚本持沙箱数据令牌」的表述**。① **结构**：沙箱**容器 `network("none")`——无网卡、无任何凭据**；取数与产物搬运一律由**宿主代理**（容器外的平台侧进程）代劳；② **通道**：脚本把取数请求写进挂载 IO 目录 → 宿主代理做四道检查（接口白名单 / 入参 schema / 带 `X-Api-Key + HMAC + 沙箱数据令牌` 代调网关 / 记审计与成本）→ 结果写回目录；③ **沙箱数据令牌由宿主代理持有，不进入容器**（修订 §18.5.1 / §20.1.5 的「脚本只能拿到沙箱数据令牌」）；④ manifest 字段由 `network` 改为 `data` 取数策略（取 `none` 或 `via_host`）；⑤ **理由**：令牌进容器可被写进产物带出系统（限流 / 审计 / 撤销随之失效），容器可拨号则加固只能依赖 allowlist 配置正确；本方案与 ADR-33 ⑤ / §18.12.5 一次对齐，**平台技能与用户自建技能共用一套模型**。落点同步 §0.3-16 / §3.1 / §3.2 / §5.3 / §18.0 / §18.1.1 / §18.1.2 / §18.4.4 / §16-10 / §20.9。 |
+| ADR-35 | 多副本（≥2 实例）会话管理定稿（2026-09-26，§0.3-10/13 / §8.4 / §19.4 / §19.5 / §19.6；实现台账 `doc/refactor/TASKS.md`） | ① **会话状态与历史只有一份权威 = 框架 `AgentState`**（落 PG；实现用框架扩展 `agentscope-extensions-jdbc`，平台只补一处框架漏掉的按 key 删除）；平台**不再自建会话记录**（`SessionJournal` / `SessionHistory` 已删），历史 = 状态的**纯函数投影**（有损，明示）；**不用事件日志重放会话**——日志是审计与事实表的事实源，两条链分工不合并。② **实例内存只保留「这一轮的回放位」**（有界、可淘汰、可丢）：换实例 / 重启后由状态重建，所以「换台机器接着聊」天然成立。③ **同一会话跨副本同时只允许一轮**：Redis `SET NX PX` 轮次坑位（释放必须比对持有者）+ **CAS 作正确性底线**（坑位只是不撞车）。④ 实例硬挂 → 「开始标记在、坑位无人占」判定中断，历史与实时流说同一句「本轮没跑完，请重发」。⑤ **跨实例接流降级为「等本轮结束再整段补」**（有窗口上限，超时如实收尾，绝不空挂）；真正的跨副本实时（事件总线）列为后续项。⑥ **共享单例 agent**：键 = 工具面 + 模型 + 迭代上限（同一把键才共享），系统提示词与平台回调**每轮经调用上下文注入**，每轮结束清理该会话的 slot 缓存（否则内存随会话数无界增长）；**每轮工具清单走框架原生机制**（全部工具完整编组 + 会话激活组），禁止在每轮路径上 `registerAgentTool` / `removeTool`；框架的 DENY 规则只对 `ToolBase` 子类生效，故**工具可见性的唯一闸门是「注册了哪些工具」**。 |
+| ADR-36 | 多副本运行时组件选型：凡是框架已有的，一律用框架（2026-09-26，§19.4 / §19.5，ADR-35 的实现细化；台账 `doc/refactor/TASKS.md`） | ① **会话状态存储**改用框架扩展 `agentscope-extensions-jdbc` 的 `JdbcAgentStateStore` + 按 `DataSource` 自动识别的方言（生产 PG、测试 H2 同一份代码），平台删掉自研实现，只补一处框架漏掉的「按 key 删除」（框架接口上 `delete(userId, sessionId, key)` 是空默认方法，JDBC 实现只覆写了「删整个会话」）。表名 `agentscope_sessions`；寻址列 `session_id` 装的是**槽位号** `<userId>:<sessionId>`（匿名用 `__anon__`），这是与框架之间唯一的隐式约定，用回归用例钉住。② **轮次闸门实现框架接口** `io.agentscope.harness.agent.gateway.SessionTurnGate`（平台提供 Redis / 内存两套实现），**不用框架自带的 `LocalSessionTurnGate`**——它是阻塞式公平信号量，会把 HTTP / SSE 请求挂住数分钟，与平台「抢不到就当场告诉用户上一轮还在处理中」的口径相反。③ **框架 `DistributedStore` 是「一站式」开关**：agent 状态 / 工作区 `BaseStore` / 轮次闸门 / `MessageBus` / 异步工具注册表 / 沙箱快照与执行锁打包在一个接口里，`HarnessAgent.Builder.distributedStore(...)` 会自动接线。原「跨副本实时接流（H-01）」由此从**需要自研**降级为**需要接线**（见台账 H-01 / H-10）。④ **取舍口径**：只有框架能力与本文档契约冲突（如权限判定必须单点、F 必须在接口服务）才允许自研，且必须写 ADR 记录冲突点 + 补偿措施 + 回归用例。**（③ 的「跨副本实时只是接线活」已于 v3.6 / ADR-38 修正：框架并未提供 Redis 版总线，接流是「实现框架接口 + 接线」；`DistributedStore` 的其余子项仍待接。）** |
+| ADR-37 | 数据范围归属：由接口服务基于登录人自行推导（2026-09-26，§0.3-7/12 / §4.3 / §4.6–§4.10 / §18 / §19.1 / §19.7 / §20.1；台账 T1-16） | **修订 ADR-23 ② / ADR-26 ① / ADR-22 的「网关下发 scope」表述**：① **范围不随授权配置**：`role_api.scope` 与 `sys_api.column_whitelist` 两列已在 V13 迁移中 DROP（`role_api` 退化成纯关联表：只回答「这个角色能不能调这个接口」）。② **范围不下发、不由网关计算**：范围是「业务表结构 + 登录人」的知识（哪个字段代表科室、哪个代表本人），只有接口服务具备，因此**推导与「范围 → SQL」都在接口服务里完成**；网关只保留**接口可用性判定（`apiSet`，多角色并集）**、身份解析与请求签名。③ **fail-closed 不变**：推导不出来 / 登录人缺少必要归属信息 → 403，绝不当「全部」。④ **列级没有白名单**：返回哪些列由接口自己的 SQL 与返回类型写死（比运行时白名单更硬）。⑤ **代价与边界**：每接一个新接口都要在接口里写过滤条件（这是刻意的：范围必须与业务表结构一起理解）；网关不再兜底范围，F 底线完全落在接口服务内，因此**接口服务必须只接受网关连接 + 强制验签**这两条硬约束更加不能放松。 |
+| ADR-38 | 跨副本实时续看（H-01）：用框架 `MessageBus` 的接口与会话事件语义，底座换成 Redis（2026-09-26，§19.4；修订 ADR-36 ③ 的「跨副本实时只是接线活」判断；台账 H-01 已完成 / H-10 拆出剩余子项） | ① **先纠正一个判断（源码核查所得）**：框架 2.0.3 只带一个 `MessageBus` 实现——`WorkspaceMessageBus`，它把消息写进「工作区文件系统」，服务的是 agent **内部**的收件箱 / 异步工具 / 子代理 / 团队（平台一律关闭，ADR-31），**框架并没有提供 Redis 版总线**；接入层要的是「会话时间线」那组语义，所以**用框架的接口 + 平台实现**（`RedisMessageBus`；`InMemoryMessageBus` 供单实例 / 测试，只是退化成改造前的行为，不会静默出错）。② **接入层按「追日志」读，不按「订阅推送」读**：条目号单调递增（Redis 全局自增、定宽零填充，所以字符串比大小即先后），按游标读天然有序、不重不漏；推送在「断线 → 重连」的交界处必然要么丢一段、要么重一段，必须再写一层去重与排序，代价大于收益。延迟上限 = 轮询间隔（默认 200ms），对逐字返回的模型流用户感知不到。③ **实时只是加速**：总线上读不到内容时，仍按 ADR-35 ⑤ 走「等本轮跑完整段补 / 中断 / 超时」三条交代；**已经读到实时内容时不再整段补**（否则同一段回答会下发两遍，比慢更难解释）。④ **数据性质划清**：总线上的东西是**这一轮正在跑**的临时数据（Redis 带 TTL、内存版按条数封顶），会话正文与历史的权威仍然是 PG 里的框架 `AgentState`（ADR-35 ① 不变）；**写总线失败只记 warn，绝不影响这一轮**（丢了它只是退回整段补）。⑤ **落点**：`LiveTurnChannel`（平台口）+ `RedisMessageBus` / `InMemoryMessageBus`（框架接口实现）+ `CrossInstanceTurnRelay`（一个轮询循环里同时做「追实时」与「看状态」，共用游标——不重不漏由结构保证，不靠事后去重）。 |
 
 
 ---
@@ -194,8 +201,8 @@ flowchart LR
 | 服务 | 职责 | 无状态 | 说明 |
 | :-- | :-- | :-- | :-- |
 | `agent-service` | P1–P7：Graph 编排、上下文装配、节点 A 工具可见性注入、慢路径 ReAct loop、§9.5 工具执行管线、数字台账与算式复算校验、格式化、SSE 流式；**运行时经 `AgentRuntimePort` 可插拔**（§18.10 / ADR-32） | 是 | 平台 core 不依赖任何 agent 框架；`HarnessAgent` 壳（ADR-31 基线）只是**当前默认实现**；可水平扩展 |
-| `data-gateway` | G1–G5：身份校验 + **权限单点判定**（算完 `scope` 后随请求体下发）+ **对下游请求签名**（API Key + HMAC-SHA256，§20.1）、路由与协议适配（对外 MCP / 对内 REST）、限流熔断预算、审计 | 是 | **数据面唯一通道**，接口服务只接受它 |
-| `接口服务 ×N` | I1–I6 读 / W1–W3 写：**验签**（API Key + HMAC，I1）+ 接收网关下发的身份与范围（I2）、入参校验（I3）+口径、节点 F 行/列过滤（I4）、执行+溯源、审计 | 是 | 按业务域部署；新增域不改 agent / 网关代码 |
+| `data-gateway` | G1–G5：身份校验 + **接口可用性单点判定**（`apiSet`；把 `userId + requestId` 随请求体下发，**不算、不下发数据范围**）+ **对下游请求签名**（API Key + HMAC-SHA256，§20.1）、路由与协议适配（对外 MCP / 对内 REST）、限流熔断预算、审计 | 是 | **数据面唯一通道**，接口服务只接受它 |
+| `接口服务 ×N` | I1–I6 读 / W1–W3 写：**验签**（API Key + HMAC，I1）+ 接收网关下发的身份（I2）、入参校验（I3）+口径、节点 F 行范围过滤（I4，按登录人自行推导）、执行+溯源、审计 | 是 | 按业务域部署；新增域不改 agent / 网关代码 |
 | `skill-execution-service` | S0–S7：技能包加载/版本锁定、节点 B 触发鉴权、受限子 agent、数据工具、沙箱、工件登记、结果压缩 | 是 | 骨架期内嵌 agent-service（按模块边界写死，见 §19.11） |
 | `sandbox-runner` | py 脚本隔离执行（**容器无网卡、无凭据**；取数经宿主代理代调，§18.4.4） | 是 | 骨架期后置 |
 | `management-service` | M1–M7：登录鉴权、用户/角色/权限配置、口径字典、接口/技能注册、审计回放监控、确定性查询表单（后置） | 是 | Web 后端；配置写 PG；业务数据读走网关、平台元数据与审计读走独立只读出口（§18.4.6） |
@@ -212,16 +219,16 @@ flowchart LR
 
 1. 用户输入（SSE 连接内）→ agent-service 创建会话上下文快照。
 2. 意图识别节点：LLM 结构化输出 `{intent, domain, slots, confidence}`，完成指代消解。
-3. 权限校验节点：查 PG 得到 `visibleTools + dataScope + fieldPolicy`，注入 Graph State（**dataScope 仅用于工具调用时透传，Agent 上下文不包含范围明细**）。
+3. 权限校验节点：查 PG 得到 `visibleTools`（可见工具 + 接口契约），注入 Graph State（**数据范围不在这一层算、也不进 Agent 上下文**——它由接口服务基于登录人自行推导，见 §19.1 / ADR-37）。
 4. 路由：快路径 → 构造任务契约 → MCP Client 经 data-gateway 调接口服务。
-5. data-gateway G3 判定并下发身份与范围、并**对请求签名** → 接口服务：**验签（I1，API Key + HMAC，防伪防篡改）** → 入参校验 → 接收身份与范围（I2，不再判定、不再查权限库）→ 数据范围过滤（I4，WHERE 注入）→ 口径映射 → 查询 PG → 返回标准化结果（含 `source=apiId, metricKey, timeRange` 溯源字段）。
+5. data-gateway G3 判定**接口可用性**、下发身份（`userId + requestId`）并**对请求签名** → 接口服务：**验签（I1，API Key + HMAC，防伪防篡改）** → 入参校验 → 接收身份（I2，不重查权限库、不回查网关）→ 数据范围过滤（I4，按登录人自行推导范围并注入 WHERE） → 口径映射 → 查询 PG → 返回标准化结果（含 `source=apiId, metricKey, timeRange` 溯源字段）。
 6. 数字一致性校验节点：核对模型答案的数字是否都能落到「数字台账编号」或已复算通过的算式结果（§6.3）。
 7. 格式化节点：输出 SSE 事件流（步骤事件 + 最终答案卡片）。
 8. 全程事件**先写本地 append-only 日志（唯一事实源）再经 EventBus 异步幂等落库 PG**（见 §19.6 / ADR-28）。
 
 ### 3.5 核心数据流（慢路径：骨架期唯一路径）
 1. 用户输入（SSE 连接内）→ agent-service 创建/恢复会话上下文快照（ContextSnapshot）。
-2. 权限校验节点：查 PG 得到 visibleTools + dataScope + fieldPolicy；「上下文装配节点」同轮加载用户档案（偏好/习惯，ADR-17），一并注入 Graph State。**dataScope 仅透传 data-gateway / 接口服务执行上下文，Agent 上下文不包含范围明细**。
+2. 权限校验节点：查 PG 得到 visibleTools（可见工具 + 接口契约）；「上下文装配节点」同轮加载用户档案（偏好/习惯，ADR-17），一并注入 Graph State。**数据范围不进 Agent 上下文，也没有「网关下发范围」这一步**——它由接口服务基于登录人自行推导（§19.1 / ADR-37）。
 3. 意图节点（空占位）直接透传 → 路由直连慢路径：构建 Agent（Toolkit 只含 visibleTools；System Prompt = 角色约束 + 口径字典精简版 + 硬约束 + 用户档案摘要 + ContextSnapshot）。
 4. AgentScope ReAct loop：Thought/Action/Observation 逐步经 MCP Client 调 data-gateway → 接口服务 / 技能工具（骨架期接口实现留空，接入即跑通）；全程以 SSE 步骤事件回传。
 5. 数字一致性校验节点：数字台账编号 + 算式复算（见 §6.3「数字一致性校验」）。
@@ -232,8 +239,8 @@ flowchart LR
 ## 4. 权限体系（自建）
 
 ### 4.1 模型
-- **用户 ↔ 角色**：多对多，多角色权限取并集——**授权与数据范围同一口径**：可调接口 / 技能取并集（§4.6），`scopeFor` 范围同样取并集（§4.9 / §19.1）。
-- **技能 / 接口权限**：以技能为授权单元——角色配技能即获得该技能声明接口的使用资格；**技能不含数据范围**，范围只在角色直配 `role_api` 一处承载（详见 §4.6–§4.9）。
+- **用户 ↔ 角色**：多对多，多角色权限**授权取并集**：可调接口 / 技能取并集（§4.6）；**数据范围不在这里配**——范围由接口服务基于登录人自行推导（§4.9 / §19.1 / ADR-37）。
+- **技能 / 接口权限**：以技能为授权单元——角色配技能即获得该技能声明接口的使用资格；**技能不含数据范围，平台也不给角色配范围**（范围由接口服务基于登录人推导，详见 §4.6–§4.9）。
 - **权限变更生效时机**：骨架期零缓存，每次校验直查 PG（后续加缓存必须带主动失效，ADR-08）；注意令牌寿命带来的延迟——**停用 / 离职立即生效**（网关每次查用户状态），**角色变更 / 撤权最多 15 分钟**生效（§19.4）。
 
 ### 4.2 数据表（PG）
@@ -258,9 +265,9 @@ permission_audit(id, trace_id, user_id, role_ids, tool_name, decision, reason, s
 | :-- | :-- | :-- |
 | L1 工具白名单 | agent-service P2 | Agent Toolkit 只注册 `visibleTools`（技能 `skill_*` + 直连接口 `iface_*`）；Graph 路由也只允许授权工具 |
 | L2 入参校验 | 接口服务 I3 | 参数 schema、枚举（指标必须命中口径字典）、ID 存在性、时间区间合法性 |
-| L3 数据级校验 | 接口服务 I1（验签，防伪防篡改）+ I2（接收网关下发的身份与范围）+ I4（F 兜底） | 先按 §20.1 验签（API Key + HMAC）确认请求来自网关且未被篡改，再使用**网关下发的** `userId` 与 `scope` 强制注入数据范围 WHERE；字段按接口台账字段白名单（`sys_api.column_whitelist`）处理 |
+| L3 数据级校验 | 接口服务 I1（验签，防伪防篡改）+ I2（接收网关下发的身份）+ I4（F 兜底） | 先按 §20.1 验签（API Key + HMAC）确认请求来自网关且未被篡改，再用身份里的 `userId` **自行推导本次可见范围**并强制注入 WHERE（推导不出来 → 403）；返回哪些列由接口自己的 SQL 与返回类型写死 |
 
-**关键原则**：`dataScope` 明细只存在于网关与接口服务执行上下文，Agent/LLM 永远看不到具体范围值；**判定（`apiSet` / `scopeFor`）在网关 G3 单点完成**，接口服务**验签通过后**接收网关下发的身份与范围并执行（不再重复查询权限库、不重算范围）——服务间防伪防篡改与信任边界见 §20.1，判定形态见 §19.7。
+**关键原则**：数据范围明细只存在于接口服务执行上下文，Agent/LLM 永远看不到具体范围值；**接口可用性判定（`apiSet`）在网关 G3 单点完成，数据范围（`scopeFor`）由接口服务基于登录人自行推导**（网关不算、也不下发范围）——服务间防伪防篡改与信任边界见 §20.1，判定形态见 §19.7、口径见 §19.1 / ADR-37。
 
 ### 4.4 角色种子
 `admin`（全部，含管理配置）、`boss`（老板/上级领导：跨域可见，范围可配置）、`hr`（人事）、`assistant`（助理）、`aitc`、`pharmacy`（药事）、`finance`（财务）、`market`（市场部）。种子数据含演示权限配置，用于测试。
@@ -286,7 +293,7 @@ permission_audit(id, trace_id, user_id, role_ids, tool_name, decision, reason, s
 **两条运行时校验**
 - 触发校验（技能入口）：该用户任一角色配置了该技能（role_skill）→ 才允许触发。
 - 调用校验（接口入口）：被调接口 ∈ 该用户接口并集；技能执行器只向技能代码暴露该技能自身 skill_api 白名单。
-- 数据范围（**与授权同为并集口径，§19.1**）：「能看多少」= `scopeFor(user, api)` = 该用户各角色对该接口**可见业务对象集合**（`role_api.scope`）的**并集**。**技能不携带范围**：角色经技能获得的只是接口调用资格，范围仍只来自该角色的 `role_api`；某角色对该接口无 `role_api` 行 → 该角色不贡献；全部角色都不贡献 → **403**。范围到 SQL 的翻译由**接口服务**完成（按自己业务表的归属字段拼 WHERE），再由 `sys_api.column_whitelist` 做列白名单过滤（§4.8 节点 F，兜底）。
+- 数据范围（§19.1 / ADR-37）：「能看多少」**不由平台配置、也不由网关下发**——接口服务拿到登录人 `userId` 后，按**自己业务表的归属字段**推导（如「本人负责的医生」= `doctor.owner_id = :userId`；「本科室」= 登录人科室归属与 `doctor.dept_id` 比对），推导不出来即 **403**。**技能不携带范围**：角色经技能获得的只是接口调用资格。
 
 **去审批决策（ADR-19）**
 - 技能执行运行时不引入独立人工审批节点（区别于 §11.5 对话级 HITL 确认，后者保留）。
@@ -304,11 +311,12 @@ sys_skill(id BIGSERIAL, skill_code VARCHAR UNIQUE, name VARCHAR, description TEX
           status VARCHAR DEFAULT 'draft',-- draft / active / disabled
           created_at, updated_at)
 
--- 接口台账（技能与角色共同引用；column_whitelist 为默认允许返回字段）
-sys_api(id BIGSERIAL, api_code VARCHAR UNIQUE, name VARCHAR, service VARCHAR,
-        method VARCHAR DEFAULT 'read',   -- read / write：**副作用等级，不是权限**，只决定确认 / 重试 / 审计 / 超时
+-- 接口台账（技能与角色共同引用；返回哪些列由接口自己的 SQL 与返回类型写死，台账里不配列白名单）
+sys_api(id BIGSERIAL, name VARCHAR, service VARCHAR,
+        kind VARCHAR DEFAULT 'read',      -- read / write：**副作用等级，不是权限**，只决定确认 / 重试 / 审计 / 超时
         resource VARCHAR,                -- 表 / 视图 / 外部服务
-        param_schema JSONB, column_whitelist JSONB,
+        http_method VARCHAR(8), http_path VARCHAR(255),  -- 接口身份三元组：service + method + path（V13 起）
+        param_schema JSONB, scenario TEXT, result_schema JSONB,
         enabled BOOLEAN DEFAULT TRUE, owner_id BIGINT, created_at, updated_at)
 
 -- 角色配技能（授权单元，管理员日常配置）
@@ -320,22 +328,21 @@ role_skill(role_id BIGINT, skill_id BIGINT, can_view BOOLEAN DEFAULT TRUE,
 -- 技能声明接口（作者声明，发布时管理员审核通过才生效）
 skill_api(skill_id BIGINT, api_id BIGINT, approved BOOLEAN DEFAULT FALSE,
           approved_by BIGINT, approved_at TIMESTAMPTZ, PK(skill_id, api_id))
-          -- **不含数据范围字段**：技能只声明「用哪些接口」，范围统一由 role_api 承载
+          -- **不含数据范围字段**：技能只声明「用哪些接口」；数据范围不随授权配置（由接口服务基于登录人推导）
 
--- 角色直配接口（授权 + 数据范围，**唯一来源**）
+-- 角色直配接口（**只承载授权**：这个角色能不能调这个接口）
 role_api(role_id BIGINT, api_id BIGINT,
-         scope JSONB,              -- 该角色对该接口**可见的业务对象集合**
-                                   -- 如 {"depts":["心内科"]} / {"doctors":[1,2]} / {"all":true}
          PK(role_id, api_id))
+         -- **没有 scope 列**（V13 迁移已 DROP）：数据范围不由授权承载，改由接口服务基于登录人推导（§19.1 / ADR-37）
          -- 不设 is_read_only：读 / 写由 sys_api.method 声明（副作用等级），不参与权限判定；
          -- 要禁止某角色写，就不给它该写接口的授权
 ```
 
-- **行 / 列范围承载（多角色并集）**：行级（对象级）范围 = `scopeFor(user, api)` = 该用户各角色 `role_api.scope`（可见业务对象集合）的**并集**。列级白名单 = sys_api.column_whitelist，可在授权时收紧。字段脱敏（masked / hidden）后续需要时在输出格式化层扩展，骨架期不建表。
-- **单个角色的贡献规则（逐角色、只取一份）**：该角色有 `role_api(role, api)` 行 → 用 `role_api.scope`；没有该行 → 该角色不贡献（**技能不给范围**，只给接口调用资格）。全部角色都不贡献 → **直接 403**，而不是退化成空范围。
-- **范围 → SQL 由接口服务翻译**：权限模块只交付「可见业务对象集合」，**不掺和业务表结构**；接口服务按自己业务表的归属字段（如 `doctor.owner_id` / `doctor.dept_id`）拼 WHERE 条件。
+- **范围不落配置表**：行级（对象级）范围 **不在平台侧配置**，由**接口服务基于登录人自行推导**（§19.1 / ADR-37）；列级没有白名单——返回哪些列由接口自己的 SQL 与返回类型写死。字段脱敏（masked / hidden）后续需要时在输出格式化层扩展，骨架期不建表。
+- **授权仍然逐角色取并集**：用户可调接口 = 各角色「可得接口」的并集（角色直配 + 角色所配技能声明的接口）。**技能不给范围**，只给接口调用资格；某角色对该接口无任何来源 → 该角色不贡献；全部角色都不贡献 → **直接 403**，而不是退化成空范围。
+- **范围 → SQL 由接口服务一步完成**：范围本来就是「业务表结构 + 登录人」的知识（哪个字段代表科室、哪个代表本人、本人 id 是什么），所以推导与翻译都在接口服务里做（如 `doctor.owner_id = :userId`）；平台权限模块不认识业务表结构，也不参与这一步。
 - **fail-closed**：范围缺失 / 解析失败 / 出现不认识的操作符 → 一律当**无权**（403），**绝不当「全部」**。
-- 数据范围与字段级权限不再单独建表：行级 = scopeFor 多角色并集（见 §4.9），列级 = sys_api.column_whitelist（见上）。
+- 数据范围与字段级权限都不单独建表：行级由接口服务基于登录人推导（见 §4.9），列级由接口自己的 SQL 与返回类型写死。
 - 技能与版本元数据 = `sys_skill` / `sys_skill_version`（见 §18.5.8）；本节只定义授权表。
 
 ### 4.8 技能 / 接口权限控制节点（A–F，防绕过分层）
@@ -370,7 +377,7 @@ role_api(role_id BIGINT, api_id BIGINT,
 节点D  接口范围预取（体验层；已合并进接口服务 I4 预检，不单独实现）
    │    查该用户对接口A的可用范围，先本地拦一次
    ▼
-节点E  接口调用鉴权（强制层②：网关 G3 单点判定，下发身份与范围，见 §20.1）
+节点E  接口调用鉴权（强制层②：网关 G3 单点判定接口可用性并下发身份，见 §20.1）
    │    api ∈ 用户接口并集？(技能携带 ∪ 角色直配) ──否──► 403
    │    写操作？非白名单 ──► 拒绝
    │    通过 → 对下发请求签名（API Key + HMAC-SHA256，覆盖请求体摘要，§20.1）
@@ -389,12 +396,12 @@ role_api(role_id BIGINT, api_id BIGINT,
 | A 技能/接口可见性注入 | agent-service P2（Toolkit 装配） | 注入该用户可触发技能（viewableSkills）与直连接口（apiSet） | 体验层（可绕过，非安全） |
 | B 技能触发鉴权 | skill-execution-service S1 入口 | canTrigger：角色配置了该技能？入参符合 param_schema？ | 强制层① |
 | C 技能执行器隔离 | skill-execution-service S2 工具构造 + S5 沙箱 | 只向技能代码暴露 skill_api 白名单；无 DB 凭据，无法绕行直连 | 代码层强制 |
-| D 接口范围预取 | 不单独实现（合并进接口服务 I4 预检） | dataScope 参数预拦（越界参数本地拒绝） | 体验层（已去掉） |
-| E 接口调用鉴权 | **data-gateway G3（单点判定）** | api ∈ 用户接口并集；read 限制；身份与范围由网关自行推导并下发，并对下发请求签名（§20.1） | 强制层② |
-| F 数据级过滤 | 仅接口服务 I4（最后底线） | **先验签**（API Key + HMAC，§20.1，失败 401）；再按网关下发 scope 强制行范围过滤（scopeFor 多角色并集：各角色授权范围取并集）+ 字段白名单（sys_api.column_whitelist） | 兜底层（最后底线） |
+| D 接口范围预取 | 不单独实现（合并进接口服务 I4） | 越界参数本地拒绝（范围由 I4 基于登录人推导，不在网关预取） | 体验层（已去掉） |
+| E 接口调用鉴权 | **data-gateway G3（单点判定）** | api ∈ 用户接口并集；read 限制；**身份**由网关解析并下发（`userId + requestId`），并对下发请求签名（§20.1）；**数据范围不在网关计算** | 强制层② |
+| F 数据级过滤 | 仅接口服务 I4（最后底线） | **先验签**（API Key + HMAC，§20.1，失败 401）；再**基于登录人自行推导可见范围**并强制行过滤（推导不出来 → 403，绝不当「全部」）；返回哪些列由接口自己的 SQL 与返回类型写死 | 兜底层（最后底线） |
 | 横切·审计 | 全链路 | requestId 串接：谁 / 哪个技能 / 哪些接口 / 参数 / 返回规模 | 审计 |
 
-- 沿用 §4.3 关键原则：dataScope 明细只存在于接口执行上下文，Agent / LLM 不可见；E、F 每次调用独立校验（防绕过）。
+- 沿用 §4.3 关键原则：数据范围明细只存在于接口执行上下文，Agent / LLM 不可见；E 在网关判定接口可用性、F 在接口服务推导范围并过滤，每次调用独立做（防绕过）。
 - 节点 A / D 只是体验层：即使被绕过，B / E / F 仍强制拦截；F 是全系统最后底线，先实现、优先保证正确。
 
 > **框架能力映射（ADR-27，必守）**：A–F 的「不可绕过」性质**不得靠业务代码自觉**，必须落在 AgentScope 内置机制上——工具闸门用 `io.agentscope.core.permission` 的 `PermissionRule`（`ALLOW` / `DENY` / `ASK` / `PASSTHROUGH`，规则优先级最高）+ `PermissionMode`（`DEFAULT` / `ACCEPT_EDITS` / `EXPLORE` / `BYPASS` / `DONT_ASK`）+ **`ToolBase#checkPermissions`（工具级放行策略：默认 `PASSTHROUGH` 即不作判断，子类可重写为 `ALLOW` / `ASK` / `DENY`）**。**它的管辖范围（ADR-32 ④ 修正）**：只决定「本次工具调用要不要执行 / 要不要问用户」，在框架内部对 mode 与 rules 不可绕过，但**不涉及用户身份与数据范围**，**不是 A–F 数据级授权的底线**——数据级授权仍在网关 `G3`（唯一授权判定）与接口服务 `F`（行级过滤），见 §9.5 与 ADR-32 ④。
@@ -408,7 +415,7 @@ role_api(role_id BIGINT, api_id BIGINT,
 - **职责**：把请求凭证解析为可信身份并得出角色集；全链路透传 userId + requestId。
 - **时机**：每个请求入口（建会话 / 触发技能 / 调接口 / 直连数据）。
 - **逻辑**：验签解析（JWT / 内部令牌）→ 查 `sys_user_role` 得角色集（多角色并存、后续取并集）→ 生成或透传 requestId。
-- **边界**：凭证无效 / 过期 → 401；执行类请求缺 requestId → 400；**身份只在网关解析一次**；内网跳次由**服务间签名**（API Key + 共享密钥 + HMAC，§20.1）保证「请求确实来自网关且未被篡改」，接口服务据此直接使用网关下发的身份与范围、不再判定；网关自身不接受调用方自带的 userId / 角色 / 范围字段。
+- **边界**：凭证无效 / 过期 → 401；执行类请求缺 requestId → 400；**身份只在网关解析一次**；内网跳次由**服务间签名**（API Key + 共享密钥 + HMAC，§20.1）保证「请求确实来自网关且未被篡改」，接口服务据此直接使用网关下发的身份，**接口可用性不再判定、数据范围自行推导**；网关自身不接受调用方自带的 userId / 角色 / 范围字段。
 
 ##### 节点 A · 技能 / 接口可见性注入（体验层）
 - **职责**：Agent 只“看得见”该用户可触发的技能与直连接口（降低误触发与幻觉面）。
@@ -464,19 +471,18 @@ executor.run(skillId, params, user):
 ##### 节点 D · 接口范围预取（体验层；已合并进 I4，不单独实现）
 > §18.3：D 不再单独实现，其预检合并进接口服务 I4；本节保留定义供理解。
 - **职责**：调用接口前先按用户身份算出可用范围，本地拦截明显越界参数，减少打到接口服务的无效请求。
-- **逻辑**：`scopeFor(user, apiId)` → 校验业务对象 / 时间 / 字段在范围内 → 越界本地拒绝或纠正。
+- **逻辑**：本节点**不再自己算范围**（D 已合并进接口服务 I4）：范围由接口服务基于登录人推导并做行过滤；这里最多做与权限无关的轻量参数检查（时间窗 / 枚举值）。
 - **性质**：体验层，可被绕过；真正的强制在节点 E / F。
 - **伪代码**
 ```text
 dataClient.call(apiId, params, ctx):
-  scope = scopeFor(ctx.user, apiId)             # 多角色并集（§19.1）
-  if !within(params, scope): return { code: 403 }
+  # 这里不再自己算范围：范围由接口服务基于登录人推导，并在 I4 做行过滤（D 已合并进 I4，§4.9）
   return apiGateway.call(apiId, params, ctx)    # 节点 E
 ```
 
 ##### 节点 E · 接口调用鉴权（强制层②：网关 G3 单点判定）
-- **职责**：**网关 G3 单点判定**「用户能否调该接口」并算出数据范围，随后把 `userId + scope` 随请求体下发给接口服务；接口服务直接使用，不再二次校验（§20.1）。
-- **逻辑**：网关解析可信身份 → 技能链路：接口 ∈ 该技能 runtimeApis 且 canTrigger(user, skill)；直连链路：接口 ∈ `apiSet(user)`（并集）→ 写操作检查（接口 read 限制）→ 通过后把身份与 scope 下发接口服务，进入节点 F。
+- **职责**：**网关 G3 单点判定**「用户能否调该接口」（接口可用性 `apiSet`），随后把 `userId + requestId` 随请求体下发给接口服务；**数据范围不算、也不下发**——由接口服务基于登录人推导（§19.1 / §20.1 / ADR-37）。
+- **逻辑**：网关解析可信身份 → 技能链路：接口 ∈ 该技能 runtimeApis 且 canTrigger(user, skill)；直连链路：接口 ∈ `apiSet(user)`（并集）→ 写操作检查（接口 read 限制）→ 通过后把身份下发接口服务并签名，进入节点 F（接口服务内自行推导范围后过滤）。
 - **伪代码**
 ```text
 @gateway(apiId)
@@ -489,34 +495,33 @@ handle(req):
   else:                                         # 直连链路
       if !pc.apiSet(user).contains(apiId):      return 403
   if sideEffect(apiId) != 'read':               return 403   # sys_api.method=write 默认不对技能开放
-  scope = scopeFor(user, apiId)                # 多角色并集：各角色 role_api.scope（§19.1）
-  req   = sign(req, body = { userId: user.id, scope, requestId })         # API Key + HMAC-SHA256（§20.1）
-  return queryWithScope(apiId, req.params, req)     # 节点 F：先验签，再按 scope 过滤
+  req   = sign(req, body = { userId: user.id, requestId })   # 只下发身份，不下发范围（§19.1 / ADR-37）；API Key + HMAC-SHA256（§20.1）
+  return queryWithScope(apiId, req.params, req)     # 节点 F：先验签，再由接口服务基于登录人推导范围并过滤
 ```
 - **边界**：接口不存在 / 被禁用 → 404 / 403；参数越界 → 403；直连与技能调用走同一入口；write 接口默认不对技能开放；**缺签名 / 验签失败 / 时间戳超窗 / nonce 重放 → 401**（接口服务 I1，§20.1）。
 
 ##### 节点 F · 数据级过滤（兜底层；仅接口服务 I4）
 - **定位**：§18.3 明确 F **只在接口服务 I4 实现**（只有它接数据库）。
 - **职责**：查询真正执行前把行 / 列范围写死进查询，任何上层被绕过也漏不出数据。**全系统最后底线，最先实现、优先保证正确。**
-- **逻辑**：先按 §20.1 验签（失败 401，不进入过滤）；行级：无条件追加 dept / 时间 / 病人范围（参数绑定，禁止字符串拼接，范围取自网关下发的并集 scope）；列级：SELECT 字段取 column_whitelist ∩ 业务必需字段；不接受上层传入完整 SQL。
+- **逻辑**：先按 §20.1 验签（失败 401，不进入过滤）；行级：按登录人**自行推导**出可见范围后无条件追加条件（参数绑定，禁止字符串拼接；推导不出来即 403，绝不当「全部」）；列级：SELECT 字段由接口自己的 SQL 写死（没有运行时列白名单）；不接受上层传入完整 SQL。
 - **伪代码**
 ```text
-queryWithScope(apiId, params, scope):
-  sql = "SELECT {scope.columns} FROM {api.table}
-         WHERE dept_id IN (:depts)
-           AND biz_date >= :since
-           AND patient_scope_match(:patients)"       # 全部来自 scope（参数绑定）
+queryWithScope(apiId, params, caller):
+  scope = deriveScopeFrom(caller.userId, apiId)   # 接口自己推导：哪个字段代表科室 / 本人
+  if scope == null: return 403                     # fail-closed，绝不当「全部」
+  sql = "SELECT {fixed.columns} FROM {api.table}"   # 列由接口 SQL 写死，没有运行时白名单
+  sql += " WHERE dept_id IN (:depts) AND biz_date >= :since AND doctor_id = :self"  # 全部来自 scope（参数绑定）
   return db.query(sql, scope.bind())
 ```
 
 ##### 横切 · 身份透传与审计
-- 内部令牌只代表真实 userId，全链路透传（对话 → 技能服务 → 接口服务）；**身份解析只发生在网关**；内网跳次由服务间签名（API Key + HMAC，§20.1）保证来源与完整性，校验通过后直接使用网关下发的身份与范围。
+- 内部令牌只代表真实 userId，全链路透传（对话 → 技能服务 → 接口服务）；**身份解析只发生在网关**；内网跳次由服务间签名（API Key + HMAC，§20.1）保证来源与完整性，校验通过后直接使用网关下发的身份（范围由接口服务自行推导）。
 - requestId 串接全链路：audit_log 记录 谁 / 哪个技能 / 哪些接口 / 参数摘要 / 返回规模 / 耗时；拒绝事件必记。
 - 监控先行两项：同一用户高频被拒（疑似权限误配 / 滥用）、单接口调用量突增（疑似技能批量调用）。
 
 ### 4.9 判定函数与发布规则
 
-- **判定函数（权限模块统一实现，任何入口不可绕过）**：授权判定链 rolesOf(user) → viewableSkills(user) → canTrigger(user, skill) → runtimeApis(skill) → apiSet(user)（并集公式为 apiSet 唯一实现）；对象范围解析 `scopeFor(user, api)`（**同为多角色并集**）在网关侧完成、随请求下发给接口服务供节点 F 使用（D 已合并进 I4）。多角色并集口径见 §19.1，服务间验签与信任边界见 §20.1。
+- **判定函数（权限模块统一实现，任何入口不可绕过）**：授权判定链 rolesOf(user) → viewableSkills(user) → canTrigger(user, skill) → runtimeApis(skill) → apiSet(user)（并集公式为 apiSet 唯一实现）。**对象范围 `scopeFor(user, api)` 不再由权限模块计算**：它落在接口服务里，由接口基于登录人 + 自己的业务表结构推导（§19.1 / ADR-37；D 已合并进 I4）。多角色并集口径见 §19.1，服务间验签与信任边界见 §20.1。
 - **技能发布规则**：作者声明 skill_api 并提交 → 管理员一次审核（approved=true）后才生效；platform / dept 技能必须审核；personal 技能默认仅本人可触发，自用可豁免审核，开放分享时强制审核。
 - **错误消息统一**：拒绝消息沿用 §4.5（如「未找到您有权查看的相关数据」），差异仅在审计日志，防枚举探测。
 
@@ -526,15 +531,15 @@ queryWithScope(apiId, params, scope):
 - `canTrigger(user, skillId)` → skill ∈ role_skill[其角色] 或 personal 且 owner=本人：供节点 B / E。
 - `runtimeApis(skillId)` → skill_api(approved=true)：供节点 C 执行器白名单与节点 E 技能链路。
 - `apiSet(user)` → Σ(各角色 role_skill → skill_api) ∪ role_api：并集公式唯一实现，供节点 E 直连链路。
-- `scopeFor(user, apiId)` → **多角色并集**：逐角色取一份 `role_api(role, apiId).scope`（可见业务对象集合），再对全部角色**取并集**；某角色无该行 → 不贡献；全部无贡献 → 403（无授权来源）。**技能不贡献范围。** 供网关节点 E 计算 / 接口服务节点 F 兜底。范围只在网关侧解析与合并；**范围 → WHERE 的翻译在接口服务**（按业务表归属字段），网关与权限模块不认识业务表结构。
+- `scopeFor(user, apiId)` → **不再由平台 / 网关计算**：范围是「业务表结构 + 登录人」的知识，由**接口服务基于登录人自行推导**（ADR-37）；推导不出来（缺归属信息）→ 403。授权侧仍取并集（`apiSet`，见上一条）。
 
 ### 4.10 端到端示例
 
 - **例 1 正常链路**：住院医角色已配「抗菌药使用统计」技能（该技能绑定 /stats/usage，approved）。触发 → 节点 B 放行 → 节点 C 执行器仅暴露 /stats/usage → 节点 E：接口 ∈ 并集 → 节点 F：按心内科 / 近一年过滤 → 返回本科室报表；requestId 全程可查。
 - **例 2 绕过一（直连技能接口）**：未授权用户直接 POST 技能执行接口 → 节点 B 拒绝（403），返回统一措辞。
-- **例 3 绕过二（直连数据接口）**：用户直连未授权接口（不在并集）→ 网关 G3 拒绝；伪造身份字段 → 网关不接受调用方自带的 userId / 角色 / 范围，一律自行推导；绕过网关直连接口服务或篡改下发的 scope → 接口服务 I1 验签失败 401（§20.1）；即使前层全被绕过，节点 F 仍按网关下发范围过滤，只返回空 / 本人范围。**接口服务不可从网关之外访问**（网络层 + 服务间验签，见 §20.1）。验收用例覆盖见 §16-1。
-- **例 4 多角色并集（授权与数据范围同口径）**：用户同时是「心内科住院医（`role_api.scope`: dept=心内科）」与「药事管理员（`role_api.scope`: dept=药学部）」→ 可调接口 = 两角色并集；触发两角色都授权的技能时，`scopeFor(user, api)` = dept ∈ {心内科, 药学部}（**并集**，而非交集），能同时看到两个科室的数据；某角色对该接口没有 `role_api` 行、只是经由 `role_skill` 拿到了接口调用资格时，该角色**不贡献范围**（技能不携带范围）；两角色都无贡献 → 403。接口服务再按 `doctor.dept_id ∈ {心内科, 药学部}` 拼出 WHERE。
-- **例 5 伪造 / 篡改内部请求**：绕过网关直连接口服务且不带签名 → I1 验签失败 401；只拿到 `X-Api-Key` 而没有共享密钥 → 算不出正确签名 → 401；篡改请求体里的 `scope` → 请求体摘要变化 → 验签失败 401；重放旧请求（nonce 已消费 / 时间戳超窗）→ 401。全部拒绝事件落审计并告警（§20.1）。
+- **例 3 绕过二（直连数据接口）**：用户直连未授权接口（不在并集）→ 网关 G3 拒绝；伪造身份字段 → 网关不接受调用方自带的 userId / 角色字段，一律自行解析；绕过网关直连接口服务、或篡改请求体里的 `userId` → 接口服务 I1 验签失败 401（§20.1）；即使前层全被绕过，节点 F 仍按**接口服务自己推导出的范围**过滤，只返回空 / 本人范围。**接口服务不可从网关之外访问**（网络层 + 服务间验签，见 §20.1）。验收用例覆盖见 §16-1。
+- **例 4 多角色（授权并集 + 范围自推）**：用户同时是「心内科住院医」与「药事管理员」→ 可调接口 = 两角色并集（`apiSet`）；数据范围不再由角色上的配置决定，而是**接口服务基于登录人自己推导**——例如「心内科绩效」接口推导出本人负责 / 本科室的医生（`doctor.owner_id = :userId` 或 `doctor.dept_id = 登录人科室`）。某角色对该接口没有 `role_api` 行 → 该角色不贡献调用资格；全部角色都不贡献 → 403。
+- **例 5 伪造 / 篡改内部请求**：绕过网关直连接口服务且不带签名 → I1 验签失败 401；只拿到 `X-Api-Key` 而没有共享密钥 → 算不出正确签名 → 401；篡改请求体里的 `userId`（比如改成别人的 id）→ 请求体摘要变化 → 验签失败 401；重放旧请求（nonce 已消费 / 时间戳超窗）→ 401。全部拒绝事件落审计并告警（§20.1）。
 
 ### 4.11 落地顺序（技能执行服务）
 
@@ -575,7 +580,7 @@ queryWithScope(apiId, params, scope):
 | 用户长期偏好 | PG 结构化表（常用口径/常查医生/输出习惯） | 越用越懂用户 | 做（简单版） |
 | 向量记忆 | pgvector（接口预留） | 语义召回历史问答 | 预留，不实现 |
 - **加载位置**：用户长期偏好/习惯等预加载档案，在 Graph「上下文装配节点」每轮一次直查 PG，注入 Agent 首轮 Prompt（System Prompt 内一段「用户档案」）；**不在 ReAct loop 内逐轮加载，不作为工具结果提供**（一次快照全轮一致、可审计、少查询）。
-- 只把可向模型展示的偏好注入（常用口径、常查医生、报告习惯）；visibleTools/dataScope/字段策略等权限细节不进 Agent 上下文（仅透传 data-gateway / 接口服务）。
+- 只把可向模型展示的偏好注入（常用口径、常查医生、报告习惯）；visibleTools 与数据范围等权限细节不进 Agent 上下文（范围只在接口服务里推导与使用）。
 - 档案体量增大后（如语义记忆），改为 Agent 通过 memory_search 类工具按需召回，而非全量预载（后置）。
 
 ## 6. 防幻觉与口径（强制约束）
@@ -645,7 +650,7 @@ queryWithScope(apiId, params, scope):
 ## 7. 工具层（MCP）
 
 ### 7.1 工具层职责（data-gateway + 接口服务）
-工具不再由独立 `mcp-server` 承载（ADR-20）：`agent-service` 内置 MCP 客户端，`data-gateway` 对外暴露 MCP（可退化 REST）、对内 REST 转发；接口服务执行固定流水线：`验签（I1，API Key + HMAC）→ 入参校验（I3）→ 身份与范围接收（I2）→ 数据范围过滤（I4）→ 口径映射与计算 → 查询 → 返回`。运行时上下文（userId/sessionId/traceId）由 agent-service 透传；**网关解析身份并算出数据范围（并集口径）后随请求下发、并对请求签名（§20.1），接口服务验签通过后直接使用、不再重复查询权限库、不重算范围**。
+工具不再由独立 `mcp-server` 承载（ADR-20）：`agent-service` 内置 MCP 客户端，`data-gateway` 对外暴露 MCP（可退化 REST）、对内 REST 转发；接口服务执行固定流水线：`验签（I1，API Key + HMAC）→ 入参校验（I3）→ 身份接收（I2）→ 数据范围过滤（I4，按登录人自行推导）→ 口径映射与计算 → 查询 → 返回`。运行时上下文（userId/sessionId/traceId）由 agent-service 透传；**网关解析身份并判定接口可用性（`apiSet`）后随请求下发身份、并对请求签名（§20.1），接口服务验签通过后直接使用身份，不重复查询权限库、数据范围自己推导（§19.1 / ADR-37）**。
   - **分层原则**：Agent 层只做语义级约束（工具白名单、指标枚举来自口径字典）；数据级校验（ID 存在性、时间合法性、权限、数据范围过滤）一律在接口服务层完成——接口层面的数据校验，保证工具可复用、Agent 策略可替换。
 
 ### 7.2 骨架期工具契约（后置，口子预留）
@@ -692,6 +697,7 @@ management-service 提供工具 CRUD 与启用/停用；新增工具 → 注册 
 - **死信与滞后**：消费失败重试 5 次后进 `event_dead_letter` 并告警；消费滞后（>1 万条 / >5s）告警（§10.2 / §19.6）。
 - 关键状态（Graph 检查点/HITL 等待）骨架期落 PG，Redis 仅热读。
 - **与 agent 运行时的关系（ADR-32）**：运行时（AgentScope / 其它）产出的事件必须先**归一化为中立 `AgentEvent`**（即上面这个模型），再分两路：① `EventPublisher` 落库（§19.6 日志先行）；② SSE 投影（§12.2）。**框架专有事件类型不得直接进入本模型**——这是「换运行时不动落库、不动前端」的前提。
+- **与「会话状态」的关系（ADR-35 ①）**：本节的日志是**审计与事实表**的事实源，**不是会话正文的恢复来源**。「这个会话聊过什么」由框架 `AgentStateStore` 承载（§19.5），历史是它的投影。两条链刻意分开：合并会让「模型上下文」与「用户看到的历史」变成两个可能互相漂移的真相。
 
 ---
 
@@ -737,7 +743,7 @@ management-service 提供工具 CRUD 与启用/停用；新增工具 → 注册 
 
 **为什么 GUARD 必须独立于 PRE**：安全约束若写成 PRE 钩子，会被后续钩子的参数改写或组合放行抵消；写成 GUARD 才能保证「无论前面怎么放行，这里能一票否决」。**因此配额收紧、越权收紧、重复调用熔断、写次数上限（§19.9 的 ≤3 次）一律写 GUARD，不写 PRE。**
 
-- **本系统各段落的落点**：PRE = 网关下发 `scope` 注入、写操作确认（§19.9 `confirmId`）、技能启动前一次确认；GUARD = 行数与导出配额、写操作次数上限、重复调用熔断、范围收紧；EXECUTE = 单次工具超时（§9.1）、只读幂等重试、耗时与 token 计数；POST = 大结果 spill 只回 locator（§18.4.3 S4）、行数截断、脱敏兜底复检、跑偏信号拦截（§10.4）；RESULT = 数字台账登记（§6.2）、审计落库、SSE `tool_result` 投影（§12.2）。
+- **本系统各段落的落点**：PRE = 身份注入（`userId`）与写操作确认（§19.9 `confirmId`）、技能启动前一次确认；GUARD = 行数与导出配额、写操作次数上限、重复调用熔断、范围收紧；EXECUTE = 单次工具超时（§9.1）、只读幂等重试、耗时与 token 计数；POST = 大结果 spill 只回 locator（§18.4.3 S4）、行数截断、脱敏兜底复检、跑偏信号拦截（§10.4）；RESULT = 数字台账登记（§6.2）、审计落库、SSE `tool_result` 投影（§12.2）。
 - **实现落点**：`common/toolpipeline/`（`ToolStage` / `ToolPreHook` / `ToolGuard` / `ToolPostHook` / `ToolInvocation` / `ToolOutcome`）+ `agent-service/agent/tool/ToolPipelineRunner`（**唯一引擎**，各段钩子为独立 Spring Bean，按 `@Order` 定序）+ `ToolPipelineMiddleware implements MiddlewareBase`（挂 `onActing`）。
 - **通道适配器（硬要求）**：AgentScope 明确「`onActing` 只包裹 agent 运行时内部的工具执行，external execution 不会被追踪」。本设计的**技能调用与沙箱 job 正是 external execution**，因此必须同时订阅 `REQUIRE_EXTERNAL_EXECUTION` / `EXTERNAL_EXECUTION_RESULT`，把外部通道映射进同一条五段管线；否则技能整条链路绕开管线，§10.4 的拦截与 §6.2 的台账登记全部失效。
 - **最小落地顺序**：M1 只放 `ToolExecutor` + `AuditPostHook`（行为不变，用 Trace 对数验证覆盖 100%）→ 接 `SpillPostHook`（同时删除 §18.4.3 S4 的技能内特例）→ 接 `ConfirmPreHook` + `NumberLedgerHook` → 接 `ToolGuard`（把 §10.4 从统计改为拦截）。
@@ -787,7 +793,7 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 - 对抗用例进测试集（注入诱导越权/泄露/伪造数据），骨架期至少手工验证一轮。
 
 ### 11.2 输出脱敏
-字段级权限（masked/hidden）在接口服务 I4 强制执行；LLM 拿不到原始敏感值。敏感字段示例：成本明细、患者联系方式。
+字段级权限（masked / hidden）属于**后续项**（骨架期不建表）：列级没有白名单，返回哪些列由接口自己的 SQL 与返回类型写死，所以敏感列默认就不该被 SELECT；需要脱敏展示时在输出格式化层按字段规则渲染。敏感字段示例：成本明细、患者联系方式。
 
 ### 11.3 错误统一
 见 §4.5；防止通过错误差异枚举数据。
@@ -801,9 +807,9 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 ### 11.6 服务间防伪与防篡改（网关 ↔ 内部服务）
 
 - **API Key + 共享密钥（防伪）**：每个内部服务在部署时分配自己的 keyId（`X-Api-Key`）与共享密钥；接收方按 keyId 取密钥校验，未知 / 缺失 keyId → 401。密钥只代表「服务身份」，不代表用户。
-- **HMAC 请求签名（防篡改）**：调用方对「方法 + 路径 + query + 时间戳 + nonce + 请求体 SHA-256 摘要」做 HMAC-SHA256 签名（`X-Signature`）；请求体里含着网关下发的 `userId + scope`，所以**篡改数据范围会被验签直接发现**。
+- **HMAC 请求签名（防篡改）**：调用方对「方法 + 路径 + query + 时间戳 + nonce + 请求体 SHA-256 摘要」做 HMAC-SHA256 签名（`X-Signature`）；请求体里含着网关下发的 `userId + requestId`，所以**篡改身份会被验签直接发现**。
 - **防重放**：`±300s` 时间窗 + nonce 一次性（Redis `SETNX` + TTL）。
-- **边界**：验签只证明「请求来自可信服务且未被篡改」，**不替代网关单点判定**（`apiSet` / `scopeFor` 仍只在网关推导）；接口服务验签后直接使用下发值，不查权限库、不回查网关。
+- **边界**：验签只证明「请求来自可信服务且未被篡改」，**不替代网关单点判定**（`apiSet` 仍只在网关判定；**数据范围由接口服务基于登录人自行推导**，见 ADR-37）；接口服务验签后直接使用下发的身份，不查权限库、不回查网关。
 - 完整规范（签名串、校验步骤、密钥管理与轮换、失败处理、沙箱密钥隔离）见 §20.1。
 
 ---
@@ -864,10 +870,10 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 
 1. Maven 多模块工程（`agent-service`（`core` + `runtime/runtime-agentscope`，依赖方向见 §18.11.1）/ `gateway` / `interface-doctor`（示例域，骨架期可为空实现）/ `management-service` / `skill-execution-service`（骨架期内嵌 `agent-service`，按模块边界写死）/ `sandbox-runner`（py 沙箱池）/ `common`（**含 `common/agent-spi`**：`AgentRuntimePort` + 中立 `AgentEvent` / `AgentRunRequest` / `Snapshot`，与 `core` 互不依赖、禁止 import 框架包））+ Vue 前端
 2. docker-compose 本地环境 + PG Schema 初始化（权限/口径/会话/审计表；业务测试表后置）
-3. 权限模块：RBAC + 数据域数据范围 + 字段级权限表结构（直查 PG）
+3. 权限模块：RBAC（用户 / 角色 / 技能 / 接口授权；直查 PG）——**不建数据范围表**（范围由接口服务基于登录人推导），字段级脱敏列为后续项
 4. 上下文装配：意图节点空占位 + ContextSnapshot + 用户档案预加载（ADR-17）+ 澄清框架（Graph interrupt）
 5. Graph 编排 + 慢路径：**`HarnessAgent` 装配外壳**（ADR-18 二次修订 / ADR-31）内包 core `ReActAgent`（Thought/Action/Observation + SSE 步骤事件 + HITL 暂停/恢复）；**工具调用走唯一执行管线 §9.5（PRE → GUARD → EXECUTE → POST → RESULT，ADR-29）**；运行时只经 `common/agent-spi` 的 `AgentRuntimePort` 接入（§18.10 / ADR-32）；**权限闸门与横切口按 ADR-27 落在框架 Permission System + Middleware 五钩子，步骤事件由框架 typed event 投影，不自研事件总线**
-6. data-gateway 骨架（G1–G5）+ 接口服务骨架（I1–I6 流水线：入参校验 / 权限校验 / 数据范围过滤 / 口径映射），业务接口契约留空位（后置补充）
+6. data-gateway 骨架（G1–G5）+ 接口服务骨架（I1–I6 流水线：验签 / 身份接收 / 入参校验 / **按登录人推导范围并做行过滤** / 口径映射），业务接口契约留空位（后置补充）
 7. 口径字典表（含单位/精度/派生声明）+ 数字台账与算式复算校验框架（业务口径种子与端到端校验待工具接入后启用）
 8. 会话数据落库（**本地 append-only 日志先行（唯一事实源）+ 幂等投递 + 消费端攒批落库 + 死信 + 投递积压/滞后告警**，见 §19.6 / ADR-28）+ EventBus 可插拔（Redis Stream + PG Outbox，RocketMQ 接口预留）+ 幂等消费
 9. 稳定性：超时预算链 + 熔断降级 + 用户限流 + 会话 token 预算 + 慢路径并发池 + 边界防护
@@ -897,7 +903,7 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 
 > **骨架期注（ADR-15）**：第 1/2/3/4/6/8 条依赖业务工具与测试数据，待工具契约接入后再验收；骨架期先验收不依赖业务工具的项（权限链路、会话数据落库、慢路径直连管道、EventBus 幂等、LLM 故障降级提示、流式过程可回放）及 §14 骨架交付清单；里程碑以 §18.8 M1–M4 为准。
 
-1. **权限验收**：助理角色只能查自己数据范围内的医生；**多角色用户看到的是各角色数据范围的并集**（多角色同一接口、同角色多来源都取并集，§19.1）；越权调用工具返回「无权操作」且不消耗 Agent 步数；**接口服务不可从网关之外访问**（网络层验证），且**无签名 / 签名错误 / 时间戳超窗 / nonce 重放的请求一律 401**（服务间验签，见 §20.1）。
+1. **权限验收**：助理角色只能查自己数据范围内的医生；**多角色用户可调接口取并集**（§19.1）；**数据范围由接口服务基于登录人自行推导**（推导不出来一律 403，绝不当「全部」）；越权调用工具返回「无权操作」且不消耗 Agent 步数；**接口服务不可从网关之外访问**（网络层验证），且**无签名 / 签名错误 / 时间戳超窗 / nonce 重放的请求一律 401**（服务间验签，见 §20.1）。
 2. **幻觉验收**：不存在的医生/指标返回「未找到」；模型答案里的数字必须能落到**数字台账编号**或**已复算通过的算式结果**——凭空数字（无编号来源）、算式复算不一致、引用不存在的编号 → 一律降级为「只展示接口原始数据 + 口径标注」并计 `hallucination_blocked`；派生数字（如「下降 12%」）只要算式可复算即放行，且**计算过程与原始数据一并展示**；口径标注完整。
 3. **澄清验收**：同名医生出现候选确认；缺时间时反问一次；2 轮后给出引导。
 4. **性能验收（骨架期仅慢路径）**：慢路径 P95<8s（ADR-08 SLO 目标；§9.1 / §18.5.7 的 10s 为硬超时预算；本地 50 并发压测）；慢路径并发受限时不雪崩；快路径 P95<2s 待快路径恢复（ADR-15）后验收。
@@ -920,8 +926,8 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 | 慢路径 P95<8s 达标难度 | 体验 | 慢路径并发池 + 预算链；必要时拆分多步为快路径组合 |
 | LLM 供应商切换 | 意图质量波动 | OpenAI 兼容抽象 + 结构化输出 schema 校验（失败重试/降级） |
 | 会话落库写入放大 | PG 压力 | 批量异步 + EventBus 削峰 + outbox 兜底 |
-| 多角色权限并集语义复杂化 | 权限误配（范围被并大） | 权限配置页面 + 权限审计 + 越权对抗测试；`scopeFor` 并集用例进 §16-1 验收（含「两角色范围都不含该科室 → 403」的反向用例） |
-| 服务间共享密钥泄露 | 内网可伪造「任意用户 + 任意范围」的请求 | 密钥按调用方分发、不进日志 / 镜像、定期轮换（keyId 双密钥并行，§20.1）；网络策略默认全拒；验签失败告警；接口服务仍按下发 scope 做 F 底线过滤 |
+| 多角色权限并集语义复杂化 | 权限误配（范围被并大） | 权限配置页面 + 权限审计 + 越权对抗测试；范围用例进 §16-1 验收（含「接口服务推导不出可见范围 → 403」的反向用例） |
+| 服务间共享密钥泄露 | 内网可伪造「任意用户」的请求 | 密钥按调用方分发、不进日志 / 镜像、定期轮换（keyId 双密钥并行，§20.1）；网络策略默认全拒；验签失败告警；接口服务仍按**自己推导出的范围**做 F 底线过滤（范围不依赖下发，故密钥泄露不能扩大可见数据面）|
 | 算式校验可能被规避（模型不交算式、或改用「大概下降不少」这类模糊措辞） | 降级率升高、体验变差；或定性话术绕过数字校验 | 模型侧给算式 few-shot 示例 + 结构化输出 schema 约束；处置分级先补一次再降级；把「降级率 / 算式复算不一致率 / 无数字断言占比」纳入 §10.4 跑偏信号持续观察；`derived_of` 高频派生由接口直接算好，压缩模型自算面 |
 | 隐性单点（本地内存计数 / 本地定时任务 / 会话状态留在进程内） | 多副本后限流口径失真、任务重复执行、会话漂移丢状态 | §2.3 硬约束：计数一律 Redis、业务状态外置、定时任务与投递器用分布式锁；SSE 与挂起状态经 `AgentStateStore` 落 PG，连接可落到任意副本（§19.4 / §19.5） |
 | 入口单点（网关 / nginx 只有一个实例） | 网关或入口挂掉 → 聊天与管理端同时不可用 | 网关无状态、可多副本 + 负载均衡；入口不可用时给统一错误页；骨架期接受单实例，但**代码与配置不得依赖单实例**（§18.4.2 / §13） |
@@ -959,7 +965,7 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
   P2 节点A 技能/接口可见注入    │ (AgentScope MCP 注册)    │ 确定性查询/审计读─────┐
   P3 路由 · P4 主ReAct loop    ▼                         ▼                     │
   P6 数字校验(台账+复算) · P7 格式化
-                               G1 验签+身份校验+下发身份与范围+请求签名
+                               G1 验签+身份校验+下发身份+请求签名
                                G2 路由+协议适配(对外MCP,对内REST)
                                G3 节点E前置判定 · G4 限流熔断预算 · G5 审计
                                           │
@@ -967,7 +973,7 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
         ▼                                 ▼                            ▼
  [接口服务×N(按业务域)]          [skill-execution-service]        [内部读调用]
 (management 审计读；确定性查询后置、
-   I2 接收下发身份/范围           S1 节点B 触发鉴权+param_schema     审计读)
+   I2 接收下发身份           S1 节点B 触发鉴权+param_schema     审计读)
    I3 入参+口径                   S2 节点C1 受限子agent工具白名单
    I4 节点F 行/列过滤             S3 子ReAct loop(playbook)
    I5 执行+溯源                   S4 数据工具──►网关──►接口服务
@@ -989,7 +995,7 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 | Web → management-service | HTTPS + JWT | 会话层 | M1 |
 | agent-service → data-gateway | MCP（可退化 REST） | **API Key + HMAC 签名** + 用户上下文 | G1/G3 |
 | management（读数据）→ gateway | REST | **API Key + HMAC 签名** + 用户上下文 | G1/G3 |
-| gateway → 接口服务 | REST | **API Key + HMAC 签名** + 网关下发的身份与数据范围（请求体，见 §20.1） | G3 → I1（验签）→ I2 |
+| gateway → 接口服务 | REST | **API Key + HMAC 签名** + 网关下发的身份（请求体：`userId` / `requestId` 等，见 §20.1） | G3 → I1（验签）→ I2 |
 | gateway → skill-execution-service | REST | **API Key + HMAC 签名** + 用户上下文 | G1 + S1（B） |
 | skill-execution-service → sandbox-runner | 内网 HTTP（job） | **API Key + HMAC 签名**（宿主侧）+ 沙箱数据令牌（**由宿主代理持有，不进入容器**） | S5 |
 | sandbox-runner（宿主代理）→ gateway | HTTP | **API Key + HMAC 签名**（密钥与沙箱数据令牌都在沙箱宿主代理，脚本不可见） | G1/G3 → I1（验签）→ I2 |
@@ -999,7 +1005,7 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 
 - 浏览器只能到 `web` / `agent-service` / `management-service`。
 - 接口服务、沙箱**只接受网关**（技能服务→沙箱为唯一例外）。
-- 跨服务身份与范围由**网关单点解析与判定**：网关把 `userId + scope + requestId` 放进**请求体**下发给接口服务，并对整请求**签名**（API Key + HMAC-SHA256，§20.1）；接口服务**先验签**（证明「确实来自网关且未被篡改」）**再直接使用**下发值——不重解析身份、不重新判定、不再查权限库、**不回查网关**；**沙箱数据令牌保留**（与签名正交，**由沙箱宿主代理持有、不进入容器**，见 §18.4.4 / §19.7 / §20.1）。
+- 跨服务身份由**网关单点解析**、接口可用性由**网关单点判定**：网关把 `userId + requestId` 放进**请求体**下发给接口服务，并对整请求**签名**（API Key + HMAC-SHA256，§20.1）；接口服务**先验签**（证明「确实来自网关且未被篡改」）**再直接使用**下发值——不重解析身份、不再查权限库、**不回查网关**；**数据范围既不下发也不在网关计算**，由接口服务基于登录人自行推导（§19.1 / ADR-37）；**沙箱数据令牌保留**（与签名正交，由沙箱宿主代理持有、不进入容器）。
 - **沙箱容器无网络**（`network("none")`，ADR-33 ⑤ / ADR-34）：容器内脚本**不能直连**网关 / 接口服务 / PG / Redis / MinIO，也打不到云元数据服务与公网。出网只发生在**沙箱宿主代理**（容器外的平台侧进程），其白名单 = **仅网关**；脚本要取数只能把请求写进挂载的 IO 目录、由宿主代理带令牌代调（§18.4.4）。写对象存储一律经网关 → 接口服务 W1–W3，沙箱不得直连 MinIO/OSS（否则绕过工件登记、幂等与用户确认）。
 
 ### 18.2 服务节点清单
@@ -1028,7 +1034,7 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 | C | 技能执行隔离（接口白名单） | S2 工具构造 + S5 沙箱 | 代码层强制 | 技能越界调接口/直连数据 |
 | D | 接口范围预取 | **不单独实现**（合并进 I4 预检） | 体验层（已去掉） | — |
 | E | 接口调用鉴权（`api∈apiSet`/read 限制） | **网关 G3（单点判定）** | 强制② | 越权调接口 |
-| F | 数据级过滤（行 scope + 列白名单） | **仅接口服务 I4** | 兜底（最后底线） | 越权看数据 |
+| F | 数据级过滤（行范围，由接口服务基于登录人推导） | **仅接口服务 I4** | 兜底（最后底线） | 越权看数据 |
 | 横切 | requestId / 审计 / trace | 全部服务 | — | 无法回放追责 |
 
 不可绕过的五条保证：**只有网关可达接口服务**（网络层）+ **服务间 API Key + HMAC 验签**（防伪 / 防篡改，§20.1）+ **网关单点判定 E** + **F 兜底** + **网关不接受调用方自带的身份字段**。剩余风险与补偿措施见 §20.1。
@@ -1101,28 +1107,28 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 #### 18.4.2 data-gateway：数据的「门卫 + 唯一的门」
 
 **定位**：所有「带着用户身份去碰数据」的请求都必须经过它；接口服务只接受它。这样只需要在一个地方做入口管控，也不会出现「某个服务偷偷绕过去查数据」。
-- **无状态与可水平扩展**：网关自身不保存会话 / 权限状态（判定结果随请求下发），可起多副本 + 负载均衡。它是唯一通道，但**不允许成为单点**——入口挂掉要有统一错误页（§2.3）。
+- **无状态与可水平扩展**：网关自身不保存会话 / 权限状态，可起多副本 + 负载均衡。它是唯一通道，但**不允许成为单点**——入口挂掉要有统一错误页（§2.3）。
 
-##### G1 验明身份 + 下发身份与范围
-- 做什么：先**验签**调用方请求（API Key + HMAC + 时间窗 + nonce，§20.1；失败 401 并审计告警），确认调用方是可信的内部服务；再把「你代表哪个用户、你能看哪些数据、这次请求编号是多少」算清楚，把 `userId + scope + requestId` 放进**请求体**下发给接口服务，并**对这次下发请求签名**（`X-Api-Key / X-Timestamp / X-Nonce / X-Signature`，覆盖方法 / 路径 / query / 请求体 SHA-256 摘要）。
-- 为什么这么做：身份与范围的推导**只做一次、只在一个地方做**（否则各服务口径会不一致）；接口服务验签后不自己解析身份、不重新判定、不查权限库，也**不回查网关**（见 §19.7 / §20.1）。签名解决的是「谁发的 + 有没有被改」（防伪 / 防篡改），用户权限的推导仍然单点。
+##### G1 验明身份 + 下发身份
+- 做什么：先**验签**调用方请求（API Key + HMAC + 时间窗 + nonce，§20.1；失败 401 并审计告警），确认调用方是可信的内部服务；再解析身份（JWT → `userId` → 角色集）并判定接口可用性（G3），把 `userId + requestId` 放进**请求体**下发给接口服务，并**对这次下发请求签名**。**数据范围不在这里算**：它由接口服务基于登录人推导（§19.1 / ADR-37）。
+- 为什么这么做：**身份解析与接口可用性判定只做一次、只在一个地方做**（否则各服务口径会不一致）；接口服务验签后不自己解析身份、不重新判定接口可用性、不查权限库，也**不回查网关**（见 §19.7 / §20.1）。签名解决的是「谁发的 + 有没有被改」（防伪 / 防篡改）。**数据范围例外：它必须由接口服务自己推导**（范围 ≠ 判定，范围是业务表结构的知识，见 §19.1 / ADR-37）。
 - 附带：给沙箱任务发一张**沙箱数据令牌**，限定「这次执行只能以这个用户的身份，调用这个技能绑定的那几个接口」（令牌与签名正交：签名证明服务身份，令牌限定用户与接口面）。**令牌签发给沙箱宿主代理持有，不进入容器、脚本不可见**（§18.4.4）。
 
 ##### G2 转发
 - 做什么：根据接口 id 查注册表，找到对应的接口服务实例，把请求转过去（骨架期实现方式与健康策略见 §20.3）。
-- 签名：转发前按 §20.1 生成签名头部（`X-Api-Key / X-Timestamp / X-Nonce / X-Signature`），签名覆盖请求体摘要——**下发在请求体里的 `scope` 一旦被改动，接口服务验签即失败**。
+- 签名：转发前按 §20.1 生成签名头部（`X-Api-Key / X-Timestamp / X-Nonce / X-Signature`），签名覆盖请求体摘要——**下发在请求体里的 `userId` 一旦被改动，接口服务验签即失败**。
 - 重试策略：读操作失败可以安全重试 1–2 次（指数退避）；写操作**绝不自动重试**，避免重复上传/重复写。重试必须**重新生成时间戳与 nonce 并重新签名**（不得复用已消费的 nonce）。
 
 ##### G3 权限判定（= 权限节点 E，唯一判定点）
 - 做什么：判断这个用户能不能调这个接口（是否在他的可用接口并集里）；写操作还要检查「是否已经拿到用户确认」；技能发起的调用，还要检查「这个接口是不是该技能声明绑定的」。
-- 为什么放在网关：便宜、早拦截，能挡掉大部分无效/越权请求。**判定在本节点单点完成**——接口服务不再重复判定，改为验签后直接使用网关下发的身份与范围（§20.1）。
+- 为什么放在网关：便宜、早拦截，能挡掉大部分无效/越权请求。**判定在本节点单点完成**——接口服务不再重复判定接口可用性，改为验签后直接使用网关下发的身份（§20.1）；**数据范围不在本节点计算**（由接口服务基于登录人推导，§19.1 / ADR-37）。
 
 ##### G4 保护与限额
 - 做什么：用户级限速、按接口熔断（持续失败就暂时切断）、超时控制（读 5 秒 / 写 30 秒）、响应过大截断。
 - 为什么：防止一个坏请求拖垮整条链路。
 
 ##### G5 记账与监控
-- 做什么：每一次放行或拒绝都记录：谁、什么技能、哪个接口、放行还是拒绝、原因、当时的数据范围快照。
+- 做什么：每一次放行或拒绝都记录：谁、什么技能、哪个接口、放行还是拒绝、原因、当时的数据范围快照（`data_access_audit.scope_snapshot` 由接口服务填**本次实际用到的过滤条件**；范围管理落地前该栏为空，空 ≠ 没有范围限制）。
 - 用途：事后追责、问题排查、合规审计。
 
 #### 18.4.3 skill-execution-service：技能的「执行车间」
@@ -1196,29 +1202,29 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 | 步骤 | 做什么（白话） | 出错 |
 |--|--|--|
 | I1 | 认来源与目标：只接受网关连接（网络层保证，并记录对端）；**验签**（API Key + HMAC-SHA256 + 时间窗 + nonce 防重放，§20.1），确认目标接口已注册、`requestId` 合法 | 验签失败 / 来源非法 → 401；接口不存在 → 404（统一措辞） |
-| I2 | **接收并使用**网关下发的身份与数据范围（不再查询权限库、不重算范围，见 §20.1）；写操作还要验确认凭据 | 403 统一措辞 |
+| I2 | **接收并使用**网关下发的身份（不再查询权限库、不回查网关，见 §20.1）；**数据范围不靠下发**——在 I4 由接口自己基于登录人推导；写操作还要验确认凭据 | 403 统一措辞 |
 | I3 | 检查参数与口径：格式、时间范围、指标换算 | 400 统一措辞 |
-| I4 | **行/列过滤**（= 节点 F 最后底线）：按网关下发的用户对象范围（**各角色 `role_api.scope` 并集；技能不携带范围**）给查询加过滤；接口服务按自己业务表的归属字段拼 WHERE | 越权就返回空/仅本人范围 |
+| I4 | **行过滤**（= 节点 F 最后底线）：由接口**基于登录人自行推导**可见范围，再按自己业务表的归属字段拼 WHERE（推导不出来 → 403，绝不当「全部」）；列由接口自己的 SQL 写死（没有运行时白名单） | 越权就返回空/仅本人范围 |
 | I5 | 执行并标注来源：用参数化查询执行；返回时带上「哪个指标、哪个时间窗、来自哪个接口」 | 超时统一错误 |
 | I6 | 记账 | — |
 
-> 为什么不在这里「再查一次」：**「校验」与「判定」要分清**——「这请求是不是网关发的、有没有被改」由 I1 验签回答（服务身份与完整性，必做）；「这个用户能不能调、能看多大范围」的**判定**统一收敛到网关（避免两处判定口径漂移，也省掉一次权限库查询）。所以 I1 验签、I2 不判定，剩余风险与补偿见 §20.1。**节点 F（行 / 列过滤）仍必须在接口服务执行**——这一条不受影响。
+> 为什么不在这里「再查一次」：**「校验」与「判定」要分清**——「这请求是不是网关发的、有没有被改」由 I1 验签回答（服务身份与完整性，必做）；「这个用户能不能调这个接口」的**判定**统一收敛到网关（避免两处判定口径漂移，也省掉一次权限库查询）；而「这个人能看哪些数据」**只能由接口服务自己回答**（它才认识业务表结构）——所以在 I4 推导并过滤，推导不出来一律 403。剩余风险与补偿见 §20.1。**节点 F（行过滤）仍必须在接口服务执行**——这一条不受影响。
 
 写操作（例如上传文件到对象存储）额外三步：
 - **W1 防重复 + 验确认**：用「请求编号 + 文件编号」做幂等（避免重复上传）；校验用户确认凭据（`confirmId`）——技能发起的写操作，凭据来自**技能启动前那一次确认**（§19.9）。
 - **W2 执行**：写入对象存储，权限绑定到该用户和会话；返回短期有效的下载链接；文件名做净化，防路径攻击。
 - **W3 登记**：记录上传了什么、导出字段的口径快照。
 
-新增一个接口要做的事就四件：注册元数据、实现处理逻辑、写测试、**给相关角色的授权补上该接口的数据范围（`role_api.scope`）**——范围不在接口侧配。
+新增一个接口要做的事就四件：注册元数据、实现处理逻辑、写测试、**在接口里把「这个人能看哪些数据」的过滤条件写进查询**（参数绑定，推导不出来即 403）——范围不在授权里配。
 
 #### 18.4.6 management-service：管理和配置后台
 
 | 模块 | 干什么 | 通俗理解 |
 |--|--|--|
 | M1 | 登录与账号 | 进后台 |
-| M2 | 角色/权限配置 | 谁能用哪些技能/接口、能看多大范围；改动立即生效，改动本身也记账（配置变更审计表 `config_audit` 见 §20.7） |
+| M2 | 角色/权限配置 | 谁能用哪些技能/接口；改动立即生效，改动本身也记账（配置变更审计表 `config_audit` 见 §20.7）。**数据范围不在这里配**（由接口服务基于登录人推导，§19.1） |
 | M3 | 技能管理 | 上传技能包 → 自动检查（危险能力、额外网络调用）→ 人工评审（绑定接口是否最小、导出字段是否合规）→ 通过后发布成**不可变版本** |
-| M4 | 接口注册 | 登记接口 id、所属域、读写（副作用等级）、参数、列白名单；**数据范围不在这里配**，一律由角色授权的 `role_api.scope` 决定 |
+| M4 | 接口注册 | 登记接口 id、所属域、读写（副作用等级）、参数；**返回哪些列由接口自己的 SQL 与返回类型写死，台账里不配列白名单；数据范围也不在这里配** |
 | M5 | 口径字典 | 指标定义、别名、公式、时间口径 |
 | M6 | 审计/回放/监控 | 按请求编号回看整条链路；看跑偏信号、拦截数、延迟、成本 |
 | M7 | 降级入口（**骨架期不实现**） | 不用 AI 的结构化查询表单；实现时**同样要走网关和接口权限链**，不许绕过 |
@@ -1226,14 +1232,14 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 > M3 里的「导出字段清单评审」很关键：像绩效这种可能含敏感数据的导出，发布时就要审「允许导出哪些列」。
 
 **两个数据出口（管理端将来开放给所有用户后同样适用）**
-- **业务对象数据出口 → 必须经 data-gateway**：医生看自己的绩效明细、助理看自己负责的医生，都走网关，带用户身份与范围（唯一通道，不开第二个口子）。
+- **业务对象数据出口 → 必须经 data-gateway**：医生看自己的绩效明细、助理看自己负责的医生，都走网关，带用户身份（范围由接口服务基于登录人推导；唯一通道，不开第二个口子）。
 - **平台元数据 / 审计出口 → 直连只读账号**：用户 / 角色 / 技能 / 接口注册 / 口径字典 / 审计记录这一类**不挂在业务对象树上、没有 scope 可算**，走独立只读出口；**不套用户范围过滤**（否则审计查不到全量）。
-- **两个出口共用同一套判定函数**（`common` 唯一实现）：业务出口用范围判定，平台出口用角色判定（骨架期只有 admin 能进；**功能级权限后置**，见 §15）。判定逻辑**不写第二份**。
+- **两个出口共用同一套判定函数**（`common` 唯一实现）：业务出口用授权判定（接口可用性，范围由接口服务推导），平台出口用角色判定（骨架期只有 admin 能进；**功能级权限后置**，见 §15）。判定逻辑**不写第二份**。
 
 #### 18.4.7 web / common / 基础设施
 
 - **web**：登录页、对话页（步骤卡/文件卡/确认按钮）、管理页。
-- **common**：四样共用件——① 共享类型与常量（网关下发的请求体结构 `userId + scope + requestId`，见 §20.1）；② **服务间签名与验签（全系统唯一实现：`ServiceSigner` / `ServiceVerifier`，HMAC-SHA256 + 时间窗 + nonce，见 §20.1）**，避免各服务各写一套导致签名串不一致；③ **权限判定函数（全系统唯一实现，只在网关调用）**，避免各服务各写一套导致口径不一致；④ 事件与接口契约定义。
+- **common**：四样共用件——① 共享类型与常量（网关下发的请求体结构 `userId + requestId`，见 §20.1）；② **服务间签名与验签（全系统唯一实现：`ServiceSigner` / `ServiceVerifier`，HMAC-SHA256 + 时间窗 + nonce，见 §20.1）**，避免各服务各写一套导致签名串不一致；③ **权限判定函数（全系统唯一实现，只在网关调用）**，避免各服务各写一套导致口径不一致；④ 事件与接口契约定义。
 - **基础设施**：PG（业务/权限/会话/审计）、Redis（限速/工单）、对象存储（技能包/产物）、事件总线（会话数据**异步幂等落库**，见 §19.6）、监控。
 
 ### 18.5 关键契约（每一项先说「解决什么问题」）
@@ -1244,7 +1250,7 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 |--|--|--|--|
 | 用户 JWT | 认证模块 | agent/管理端 | 证明「浏览器这一侧是谁」 |
 | 服务身份（`X-Api-Key` + 共享密钥 + HMAC 签名） | 部署层（环境变量 / secret 注入，可按 keyId 轮换） | **被调用的内部服务（验签方）** | 证明「你是内部可信服务」，并证明请求内容未被篡改（§20.1） |
-| 网关下发的身份与范围（请求体） | 网关 | **接口服务验签后直接使用** | 跨服务身份与数据范围。**网关单点判定并签名；接口服务验签（防伪防篡改）但不重解析身份、不重算范围、不回查**（见 §19.7 / §20.1）；骨架期不引入 ACT |
+| 网关下发的身份（请求体） | 网关 | **接口服务验签后直接使用** | 跨服务身份。**网关单点判定接口可用性并签名；接口服务验签（防伪防篡改）但不重解析身份、不重判接口可用性、不回查**（见 §19.7 / §20.1）；**数据范围不下发**——由接口服务基于登录人自行推导（§19.1 / ADR-37）；骨架期不引入 ACT |
 | 沙箱数据令牌 | 网关 | 网关（由沙箱宿主代理持有，不进入容器） | 让**这次脚本执行**只能以指定用户身份、调指定技能的接口（与 §20.1 的服务签名正交）；脚本与模型都拿不到令牌（§18.4.4） |
 
 #### 18.5.2 技能包（manifest）
@@ -1328,7 +1334,7 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 
 - 「没生成 Excel 就想上传」→ 被工件前置条件拒绝。
 - 「脚本偷偷调技能范围外的接口」→ 被网关 G3 拒绝。
-- 「绕过网关直连接口服务、或篡改请求体里下发的 `scope`」→ 接口服务 I1 验签失败 401（§20.1）。
+- 「绕过网关直连接口服务、或篡改请求体里下发的 `userId`」→ 接口服务 I1 验签失败 401（§20.1）。
 
 #### 18.6.3 确定性查询表单（降级入口）
 
@@ -1353,14 +1359,14 @@ golden 测试集（含权限/口径/越权/注入/边界用例）+ 发版前自�
 | 8 | 数字必须带口径和来源 | 同一指标可能有多套口径，不标就说不清 | I5 + P7 |
 | 9 | 脚本声明网络策略 | 收窄脚本能做的事，万一有恶意脚本也出不去 | manifest + S5 |
 
-> **横切硬要求（v2.9 起累计）**：① 服务间请求必须带 API Key + HMAC 签名（防伪 / 防篡改，ADR-23 / §20.1）；② 数据范围一律取多角色并集，且**只由 `role_api.scope` 承载**（技能不携带范围，ADR-23 → ADR-26 前后修订，§19.1）；③ 数字必须走**数字台账 + 算式复算**（ADR-24，§6.3）；④ 会话事件**先写本地 append-only 日志（唯一事实源）再投递**，队列只是落库通道、**事件不得消失**（ADR-28 修订 ADR-25，§19.6）；⑤ 所有服务**无状态、可水平扩展、不允许单点**（§2.3）；⑥ **不重复实现框架已有能力**——权限 / 事件 / 中间件 / Trace 一律复用 AgentScope（ADR-27）。
+> **横切硬要求（v2.9 起累计）**：① 服务间请求必须带 API Key + HMAC 签名（防伪 / 防篡改，ADR-23 / §20.1）；② 授权取多角色并集；**数据范围不落配置表、也不由网关下发**，由接口服务基于登录人自行推导（技能不携带范围，ADR-23 → ADR-26 → **ADR-37**，§19.1）；③ 数字必须走**数字台账 + 算式复算**（ADR-24，§6.3）；④ 会话事件**先写本地 append-only 日志（唯一事实源）再投递**，队列只是落库通道、**事件不得消失**（ADR-28 修订 ADR-25，§19.6）；⑤ 所有服务**无状态、可水平扩展、不允许单点**（§2.3）；⑥ **不重复实现框架已有能力**——权限 / 事件 / 中间件 / Trace 一律复用 AgentScope（ADR-27）。
 
 ### 18.8 里程碑与验收（每个阶段「做完了能看到什么」）
 
 | 阶段 | 包含什么 | 怎么算做完 |
 |--|--|--|
 | M1 骨架 | 工程结构、数据库、登录、主对话流程、SSE、工具可见性注入 | 越权/注入对抗用例被拒；会话数据落库可查 |
-| M2 数据面 | 网关、一个业务域的两个读接口、直连查询、数字台账与算式复算（**确定性查询表单后置，不含在本里程碑**） | 不同角色看到的数据范围不同、**多角色取并集**；网关拒绝调用方自带的身份字段；接口服务不可从网关之外访问，且**拒绝无签名 / 签名错误 / 超窗 / 重放的请求**；数字校验能拦截或降级 |
+| M2 数据面 | 网关、一个业务域的两个读接口、直连查询、数字台账与算式复算（**确定性查询表单后置，不含在本里程碑**） | 不同角色可调接口不同、**多角色授权取并集**，数据范围由接口服务基于登录人推导；网关拒绝调用方自带的身份字段；接口服务不可从网关之外访问，且**拒绝无签名 / 签名错误 / 超窗 / 重放的请求**；数字校验能拦截或降级 |
 | M3 技能（确定性型） | 技能包管理、验票、沙箱、一个「直跑脚本」的技能 | 技能全链跑通；沙箱无凭据、外网只通网关 |
 | M4 技能（智能型） | 受限小 agent、工件依赖、上传确认、技能 SSE 事件、回放 | 五类对抗用例全拒：越白名单接口 / 跳过生成直接上传 / 伪造工件编号 / 脚本外联 / 空数据或无权限 |
 
@@ -1382,7 +1388,7 @@ agent-service/core   ──依赖──▶   common/agent-spi   ◀──依赖�
 ```
 
 - **端口 `AgentRuntimePort`**：`id()` / `version()` / `capabilities()` / `start(AgentRunRequest)` / `stream(session, turn)` → `Flux<AgentEvent>` / `confirm(session, decision)` / `cancel(session, reason)` / `snapshot(session)` / `resume(request, snapshot)` / `close(session)`。
-- **平台注入给运行时的东西**（运行时只能经由它们触达系统）：`ToolCatalog`（可见工具 + schema + 权限模式）、**`ToolInvoker`（唯一的工具执行出口）**、`RuntimeStatePort`（挂起与快照落 PG）、`EventPublisher`（§8.4）、`LedgerPort`（数字台账登记）、Deadline / `maxIters` / token 预算。
+- **平台注入给运行时的东西**（运行时只能经由它们触达系统）：`ToolCatalog`（可见工具 + schema + 权限模式）、**`ToolInvoker`（唯一的工具执行出口）**、`PlatformTurnStore`（挂起与快照落 PG，底层是 `AgentStateStore`）、`EventPublisher`（§8.4）、`LedgerPort`（数字台账登记）、Deadline / `maxIters` / token 预算。
 - **三条不变量**（任何实现都必须成立，否则不予上线）：
   1. **工具调用 100% 经 `ToolInvoker`**——运行时**不持有**数据面凭据、**不直连** data-gateway，工具一律按「外部执行」委派。这样 §4.8 的 A–F、§9.5 的五段管线、审计与数字台账**自动跟着平台走**，换框架不换安全边界。
   2. **事件 100% 以中立 `AgentEvent` 上报**（§8.4 的模型）——落库与 §12.2 的 SSE 投影由平台做，前端不改。
@@ -1401,7 +1407,7 @@ agent-service/core   ──依赖──▶   common/agent-spi   ◀──依赖�
 ```text
 common/agent-spi/                只有接口 + POJO；pom 不声明任何框架依赖
   AgentRuntimePort / AgentRunRequest / AgentEvent / AgentSession / Snapshot
-  ToolCatalog / ToolInvoker / RuntimeStatePort / RuntimeCapabilities
+  ToolCatalog / ToolInvoker / PlatformTurnStore / RuntimeCapabilities
 
 agent-service/
   core/                          pom 依赖 agent-spi；不依赖任何 agent 框架
@@ -1470,7 +1476,7 @@ stream.subscribe(eventSink);   // eventSink：落库（§8.4）+ SSE 投影（§
 [core] ToolInvokerImpl.invoke(…)
         ① 前置段：放行 / 拒绝 / 发起确认（confirmId）
         ② 守卫段：配额、越权收紧、写次数上限（只能收紧，不能放行）
-        ③ 执行：注入 userId + scope → 经网关（HMAC 签名）→ 接口服务
+        ③ 执行：注入 userId → 经网关（HMAC 签名）→ 接口服务（范围由接口服务自己推导）
         ④ 后置段：大结果 spill 落工件、行数截断、脱敏复检
         ⑤ 结果段：数字台账登记、审计、SSE tool_result
   │ 返回工具结果
@@ -1489,7 +1495,7 @@ stream.subscribe(eventSink);   // eventSink：落库（§8.4）+ SSE 投影（§
 | :-- | :-- | :-- |
 | **编译期** | `agent-service/core` 的 `pom.xml` **不声明**任何 agent 框架依赖 | 在 core 里写 `import io.agentscope.*` → **编译失败**（最硬的一道） |
 | **架构测试** | ArchUnit 规则：`core` 包不得依赖框架包，也不得依赖 `runtime.*` 包 | CI 红，合不进去 |
-| **运行期** | 运行时只拿到 `ToolCatalog` + `ToolInvoker` 回调 + `RuntimeStatePort` | 想直连网关：没有密钥；想直连 DB：没有 `DataSource` |
+| **运行期** | 运行时只拿到 `ToolCatalog` + `ToolInvoker` 回调 + `PlatformTurnStore` | 想直连网关：没有密钥；想直连 DB：没有 `DataSource` |
 | **验收期** | 契约回归（TCK）：同一套用例跑默认实现与 `runtime-noop` | 新实现跑不过 → 不许上线（§16-9） |
 | **数据期** | 会话表存 `runtime_id`，`resume` 前校验 | 跨实现恢复被拒绝（§19.14），不会「假装恢复成功」 |
 
@@ -1628,15 +1634,15 @@ public class AgentscopeRuntimeAdapter implements AgentRuntimePort {
 
 > **本章地位**：本章收录「已与需求方逐条确认、但此前未写入正文（或正文留有旧说法）」的结论。**本章是这些内容的唯一契约源**，正文对应位置只保留指针（`见 §19.x`）。冲突时优先级：**本章 > §18（含 ADR-20）> 其余章节**。决策登记见 ADR-21。
 
-### 19.1 权限口径：多角色并集（授权与数据范围同一口径）
+### 19.1 权限口径：授权取多角色并集，数据范围由接口服务基于登录人推导
 
 - **授权取并集**：用户同时拥有角色 A(dept1) 与 B(dept2) 时，可调接口 = 两角色可用接口的**并集**；可触发技能同理。
-- **数据范围也取并集**：对象范围 = `scopeFor(user, api)` = 该用户**各角色对该接口 `role_api.scope`（可见业务对象集合）的并集**。单个角色只贡献一份：有 `role_api(role, api)` 行 → 用其 `scope`；没有 → 该角色不贡献（**技能不携带范围**，技能只给接口调用资格）。
+- **数据范围不由平台配置**：范围是「业务表结构 + 登录人」的知识（哪个字段代表科室、哪个代表本人），由**接口服务基于登录人自行推导**（ADR-37）；接口可用性的**多角色并集**口径见上一条；**技能不携带范围**，只给接口调用资格。
 - **无授权来源即拒绝**：全部角色都不贡献时返回 403，**不**退化成「空范围」或「全量范围」。
-- **并集的方向是「并大」**：多角色用户比单角色用户能看到更多数据，这是 RBAC 并集的自然结果，也是本项目的明确口径（v2.9 由「取严交集」改为并集，见 ADR-23）；要限制范围就**收窄具体角色的 `role_api.scope`**。
+- **并集只作用在授权上**：多角色用户可调接口更多（v2.9 由「取严交集」改为并集，见 ADR-23）；范围不再有「收窄某个角色的范围」这种操作——要限制可见数据，就**改接口自己那条推导规则**。
 - **不做 `scope_override` 字段**：不为「给角色配技能时把范围调小」单独建字段；技能侧同样不建范围字段（`skill_api` 只管接口绑定，见 §4.7）。
-- **列级不受并集影响**：列白名单始终按 `sys_api.column_whitelist` ∩ 业务必需字段处理（列级只会更严，不随角色并集放宽）。
-- **范围 → SQL 由接口服务翻译**：权限侧只交付「可见业务对象集合」，接口服务按自己业务表的归属字段拼 WHERE；**范围缺失 / 解析失败 / 操作符不认识 → 403（fail-closed），绝不当「全部」**。
+- **列级没有白名单**：返回哪些列由接口自己的 SQL 与返回类型写死（比运行时列白名单更硬：多返回一列在编译期就不可能）；脱敏（masked / hidden）后续在输出格式化层扩展。
+- **推导与翻译都在接口服务**：接口服务按自己业务表的归属字段拼 WHERE；**范围缺失 / 解析失败 / 登录人缺归属信息 / 操作符不认识 → 403（fail-closed），绝不当「全部」**。
 - 落点：§4.1 / §4.6 / §4.7 / §4.9（公式一致，仅口径统一）。
 
 ### 19.2 技能版本：只用最新版，不做版本并存
@@ -1652,7 +1658,7 @@ public class AgentscopeRuntimeAdapter implements AgentRuntimePort {
 ### 19.3 接口版本：只用最新版 + 变更影响面提示
 
 - 接口同样**只用最新版，不做版本并存**。
-- 为规避「接口契约改了、绑定它的技能悄悄挂掉」，在 management-service 提供**影响面检查提示**：当接口的 `param_schema` / `column_whitelist` / `method` 发生变更时，列出引用该接口的**技能**（`skill_api`）与**角色直配**（`role_api`），发布前提示管理员复核。
+- 为规避「接口契约改了、绑定它的技能悄悄挂掉」，在 management-service 提供**影响面检查提示**：当接口的 `param_schema` / `result_schema` / 路由三元组（`service` + `http_method` + `http_path`）或 `kind` 发生变更时，列出引用该接口的**技能**（`skill_api`）与**角色直配**（`role_api`），发布前提示管理员复核。
 - 落点：§18.4.6 M4。
 
 ### 19.4 登录态、SSE 接入与断线续传
@@ -1661,20 +1667,31 @@ public class AgentscopeRuntimeAdapter implements AgentRuntimePort {
 - **令牌寿命与失效**：JWT 有效期 **≤15 分钟** + refresh token（不做「签发一次管一天」）；**网关每次请求查一次 `sys_user.status`**（骨架期本就直查 PG）→ **停用 / 离职立即失效**；**角色变更 / 撤权最多 15 分钟延迟生效**（等旧 token 过期；已明示接受，不引入 token 版本号）。
 - **SSE 接入**：连接前先用**一次性「入场券」**换取连接——令牌**不进 URL、不进日志**（避免被代理与日志留存）。入场券一次性消费、短时有效。
 - **断线续传必须做**：刷新页面、断网重连后要能接着看之前的回答；状态由 §19.5 的 `AgentStateStore` 承载，配合 SSE 事件回放。
-- 落点：§12.2。
+- **多副本（≥2 实例）下的续传口径**（ADR-35）：
+  - **B 换台实例继续聊**：会话存不存在、属于谁、聊过什么，全部读共享存储（会话状态在 PG，券与轮次坑位在 Redis）——**任何一台实例都能服务任何会话**；实例内存里的会话句柄只是「这一轮的回放位」，可有可无、可淘汰。
+  - **A 重连到别的实例**：本实例没有这一轮的事件时，先**追共享总线**（H-01 / ADR-38）——跑这一轮的实例每下发一条事件就往总线上记一条，别的实例按游标追着读，于是回答**边跑边到**（不是等跑完）。追不到内容（单实例、老数据、总线故障）就退回**等这一轮在持有它的实例上跑完、再整段补**（不是逐字，但答得出、不会丢）。等待有窗口上限，超时如实告知并闭合本轮，**绝不空挂连接**；**已经读到实时内容时不再整段补**（否则同一段回答会下发两遍）。
+  - **同一会话同时只允许一轮**：跨副本用带 TTL 的轮次坑位（占坑 + 释放时比对持有者）；**正确性底线是状态库的 CAS**（真撞上也不会互相覆盖），坑位是为了不撞车（省掉白跑的一轮与用户白等）。
+  - **C 实例挂了**：会话与历史仍在（共享存储）；正在跑的那一轮用「开始标记 + 坑位无人占」判定为中断，历史与实时流给出同一句「本轮没跑完，请重新发送」。
+- 落点：§12.2、§19.5、§19.6。
 
-### 19.5 挂起/恢复：用框架自带 AgentStateStore，不自己重放
+### 19.5 挂起/恢复与会话正文：权威是 AgentStateStore，不自己记一份会话记录
 
-- 挂起/恢复**使用 AgentScope 自带的 `AgentStateStore`**，不自研状态方案、不自己重放历史消息。
-- 持久化落 **PG**（框架扩展已含 `PostgresJdbcStoreDialect`），按 `(userId, sessionId)` 二元组寻址。
-- 一次落地同时解决四件事：**HITL 挂起恢复 / 服务重启恢复 / 换 pod 恢复 / 断线续传**。
-- 同一会话的并发调用用框架按 key 串行化（`callSerializationKey`）；跨 pod 时补一把 Redis 锁或队列。
-- 落点：§5.3、§8.4。
+- **状态与正文都使用 AgentScope 自带的 `AgentStateStore`**，按 `(userId, sessionId)` 定位会话、再按 `state_key` 取其中一段状态（框架落库时把它拼成**槽位号** `<userId>:<sessionId>`，匿名用户用占位名 `__anon__`）。一句话记住分工：**恢复交给 AgentStateStore，不自己重放历史消息**——平台手里虽然有 append-only 事件日志，但**不用它重放会话**（它是审计与事实表的来源，见 §19.6）。
+- 持久化落 **PG**，实现用**框架扩展** `agentscope-extensions-jdbc` 的 `JdbcAgentStateStore`（ADR-36 ①）：方言按 `DataSource` 自动识别（生产 PG、测试 H2 跑同一份代码），`getVersioned` / `saveIfVersion` 是**真版本 CAS**（单条 `UPDATE … WHERE version = ?` 按影响行数判成败，插入用 `ON CONFLICT DO NOTHING`）。表名由方言决定：`agentscope_sessions`；**表由迁移脚本建**，应用侧用 `autoCreateTable(false)` 关掉运行期建表（多实例同时启动时运行期 `CREATE TABLE IF NOT EXISTS` 在 PG 上会撞），表不存在就**启动失败**——这是要的失败方式。平台只补一处框架漏掉的「按 key 删除」：接口上 `delete(userId, sessionId, key)` 是**空默认方法**，JDBC 实现只覆写了「删整个会话」，不补会让平台侧「清掉一段状态」的调用**静默失效**（一轮跑完挂起快照还在，下次就把已结束的一轮当成还在跑）。
+- **不再自建会话记录**：曾经的 `SessionJournal` / `SessionHistory`（SSE 事件台账 + JSONL 文件）已删除。同一件事（「这个会话聊过什么」）**只允许有一个真相**——框架状态里那串送给模型的消息；平台侧的「历史」是按同一套事件形状**现算的投影**（纯函数、不落库）。
+- **投影是有损的（明示）**：没有逐字回放、没有过程事件（意图 / 权限 / 进度），工具结果只还原「调了哪个、参数、结果多大」。需要逐字与全过程时查 append-only 事件日志。
+- 平台另有三样东西挂在同一个 store 上（同表不同键，寻址与清理逻辑复用）：`platform_turn`（HITL 挂起快照）、`platform_session`（会话档案：**只存状态里算不出来的**建档时刻与归档标记）、`platform_turn_live`（当前这一轮的开始标记，中断判定的依据）。
+- 一次落地同时解决五件事：**HITL 挂起恢复 / 服务重启恢复 / 换实例（换 pod）恢复 / 断线续传 / 历史与会话列表**。
+- 同一会话的并发：**同一实例内由框架按 key 串行化**，跨副本另加一层轮次坑位（ADR-35 ③），正确性底线仍是上面那个 CAS（由框架实现保证）。
+- **不提供「状态落本地磁盘」的开关**：那等于把会话钉死在某台机器上，多副本下会**静默**失效（用户只会觉得 agent 忘了上文）。
+- 落点：§5.3、§8.4、§19.4、§19.6。
 
-### 19.6 落库口径：日志先行（唯一事实源）+ 队列仅作落库通道（ADR-28 修订 ADR-25）
+### 19.6 落库口径：日志先行（审计与事实表的唯一事实源）+ 队列仅作落库通道（ADR-28 修订 ADR-25）
+
+> **两条链的分工（ADR-35 ①，必读）**：① **会话正文与历史** → 权威是框架 `AgentState`（§19.5），历史由它投影，**不从事件日志重放**；② **审计与事实表** → 权威是本地 append-only 事件日志，队列只是把它搬进 PG 事实表的通道。两条链各记各的、互不替代：用日志重放去「恢复会话」等于凭空造出第二份会话真相（迟早与模型上下文漂移），刻意不做。
 
 - **路径**：agent-service 产生事件 → **追加写本地 append-only 日志**（`/data/eventlog/agent-{instanceId}.jsonl`，按批 `fsync`，**必须挂真实卷**；启动时校验卷可用，不可用则**拒绝启动**）→ `XADD` 进 Redis Stream（**不阻塞用户**）→ `event-persist` 消费者按消费组拉取 → **攒批**写入 PG 事实表 → `XACK` → 投递确认后按保留窗口裁剪本地日志。**用户等待路径上没有落库动作**（§8.4）。
-- **事实源**：本地 append-only 日志是**唯一事实源**，PG 事实表是查询视图。历史 / 回放 / 断线续传 / 评估 / fork-resume 一律**从日志派生**（「模型可见即落库」：进入模型请求的 System Prompt 片段、工具 schema、工具结果、注入提醒都必须能从日志重建，运行期断言违规即告警）。
+- **事实源**：本地 append-only 日志是**审计与事实表的唯一事实源**，PG 事实表是查询视图。审计回放 / 评估 / 事实表查询一律**从日志派生**（「模型可见即落库」：进入模型请求的 System Prompt 片段、工具 schema、工具结果、注入提醒都必须能从日志重建，运行期断言违规即告警）。**但「历史会话」与「断线续传的状态」不是从日志重放来的**——它们读框架 `AgentStateStore`（ADR-35 ①）；日志在这里的角色是「事后可查、可复算」，不是「会话恢复的来源」。
 - **不允许的窗口**：事件**不得消失**；Redis / 消费者故障只允许造成 PG 滞后，不允许造成日志缺条。进程重启时扫描本地日志把「投递未确认」的事件重新入队（`event_id` 幂等，重放安全）。
 - **攒批节奏**：攒够 **50 条** 或距上次刷满 **100ms**（谁先到算谁），单批上限 **500 条**；一批一个事务，批量 `INSERT`。
 - **幂等**：事实表以 `event_id` 唯一键 `ON CONFLICT DO NOTHING`，at-least-once 下不重不漏。
@@ -1689,12 +1706,12 @@ public class AgentscopeRuntimeAdapter implements AgentRuntimePort {
 
 ### 19.7 接口调用鉴权形态（网关单点判定 + 服务间签名；骨架期不引入 ACT）
 
-- **判定点在网关**（G3）：判定「这个用户能不能调这个接口」并算出数据范围（**多角色并集**，§19.1），然后把 `userId + scope + requestId` 随**请求体**下发给接口服务（放请求体是为了不受 HTTP 头大小限制），并对该请求**签名**（§20.1）。
-- **接口服务验签但不判定**：I1 按 §20.1 验签（API Key + 共享密钥 + HMAC-SHA256 + 时间窗 + nonce）——它只回答「这请求确实来自网关且未被篡改」；随后**直接使用**下发值：不重解析身份、**不重新判定 `apiSet`、不重算 `scopeFor`**、**不再重复查询权限库**、**不回查网关**。节点 E 仍是**网关单点判定**。
+- **判定点在网关**（G3）：判定「这个用户能不能调这个接口」（**接口可用性** `apiSet`，**多角色并集**，§19.1），然后把 `userId + requestId` 随**请求体**下发给接口服务（放请求体是为了不受 HTTP 头大小限制），并对该请求**签名**（§20.1）。**数据范围不在这里算、也不下发**——范围是「业务表结构 + 登录人」的知识，由接口服务基于登录人自行推导（ADR-37）。
+- **接口服务验签但不判定接口可用性**：I1 按 §20.1 验签（API Key + 共享密钥 + HMAC-SHA256 + 时间窗 + nonce）——它只回答「这请求确实来自网关且未被篡改」；随后**直接使用**下发身份：不重解析身份、**不重新判定 `apiSet`**、**不再重复查询权限库**、**不回查网关**；**数据范围由接口服务基于登录人自行推导**（§19.1 / ADR-37）。节点 E 仍是**网关单点判定**。
 - **骨架期不引入 ACT**：不需要「网关签发的短时通行证」这一凭证类型；服务间用**共享密钥 HMAC 签名**（不是 ACT，也不引入 mTLS 证书体系）。
-- **必守硬约束**：① 接口服务**只接受来自网关的连接**（网络策略**默认全拒 + 白名单放行**），且**必须验签**（失败 401）；② 网关**不接受**调用方自带的 `userId` / 角色 / 范围字段，只能自行推导；③ 权限判定函数只在 `common` 实现**一份**（§4.9），签名 / 验签也只在 `common` 实现**一份**（§20.1）；④ **节点 F 行 / 列过滤必须留在接口服务**。
+- **必守硬约束**：① 接口服务**只接受来自网关的连接**（网络策略**默认全拒 + 白名单放行**），且**必须验签**（失败 401）；② 网关**不接受**调用方自带的 `userId` / 角色字段，身份只能由网关自行解析（**数据范围根本不经过网关**）；③ 权限判定函数只在 `common` 实现**一份**（§4.9），签名 / 验签也只在 `common` 实现**一份**（§20.1）；④ **节点 F 行过滤必须留在接口服务**，范围用**接口自己推导出的**结果（§19.1 / ADR-37）。
 - **信任边界与风险**：见 §20.1——应用层已有「服务间签名」这一道（防伪 / 防篡改），但**它不替代权限判定**；密钥泄露与内网失守的剩余风险与补偿措施已明示。
-- 落点：§18.5.1、ADR-20 / ADR-22（已修订）、ADR-23。
+- 落点：§18.5.1、ADR-20 / ADR-22（已修订）、ADR-23 / ADR-37。
 
 ### 19.8 capabilities 查询接口（由网关提供）
 
@@ -1743,10 +1760,10 @@ public class AgentscopeRuntimeAdapter implements AgentRuntimePort {
 
 ### 19.13 验收口径
 
-- **并集（授权 + 数据范围）**：多角色用户可调接口 = 并集；`scopeFor(user, api)` 对象范围 = 各角色 `role_api.scope` 的**并集**；技能不携带范围；全部角色无贡献、或范围解析失败 / 操作符不认识 → 403（fail-closed，§19.1）。
+- **并集（只作用于授权）**：多角色用户可调接口 = 并集；**数据范围不落配置表、不由网关下发**，由接口服务基于登录人自行推导（§19.1 / ADR-37）；技能不携带范围；全部角色无贡献 → 403；接口服务推导不出可见范围 / 缺归属信息 → 403（fail-closed）。
 - **版本**：上传新包后旧行为不可选；执行中的包跑完；审计可查到当时的内容哈希（§19.2）。
 - **落库**：`kill -9` 后由本地日志扫描补齐未确认投递、消费组从断点续上、重复消费幂等；清空 Redis 后 PG 仍能追平（事件不消失，只有 PG 滞后）；「模型可见即落库」断言成立（§16-5 / §19.6 / ADR-28）；合规审计直写 PG、一条不漏。
-- **鉴权**：网关不接受调用方自带的 `userId` / 角色 / 范围；接口服务不可从网关之外访问（网络层，人工验证 + 部署清单）；服务间请求必须通过 API Key + HMAC 验签与防重放校验，失败一律 401（§20.1）。
+- **鉴权**：网关不接受调用方自带的 `userId` / 角色；接口服务不可从网关之外访问（网络层，人工验证 + 部署清单）；服务间请求必须通过 API Key + HMAC 验签与防重放校验，失败一律 401（§20.1）。
 - **确认**：技能启动前一次确认；技能内不再中断；自由文本无法唯一绑定时不执行而走澄清（§19.9）。
 - **保留期**：工件到期自动作废并可通知；管理端可见待确认任务数（§19.10）。
 - **部署**：S0–S7 可按模块边界独立拆分，拆分不改变对外契约（§19.11）。
@@ -1770,14 +1787,14 @@ public class AgentscopeRuntimeAdapter implements AgentRuntimePort {
 
 ### 20.1 跨服务身份与信任边界（网关单点判定 + 服务间 API Key / HMAC 签名）
 
-> **v2.9 修订（ADR-23）**：本节此前结论为「接口服务不验签、应用层没有第二道校验，网络隔离是唯一防线」。现修订为：**网关与内部服务之间的每一跳都必须做「API Key + 共享密钥」防伪与「HMAC 请求签名」防篡改**；接口服务**验签、但仍不判定**（`apiSet` / `scopeFor` 仍只在网关推导）。其余结论（不查权限库、不回查网关、F 必须留在接口服务）保持不变。
+> **v2.9 修订（ADR-23）**：本节此前结论为「接口服务不验签、应用层没有第二道校验，网络隔离是唯一防线」。现修订为：**网关与内部服务之间的每一跳都必须做「API Key + 共享密钥」防伪与「HMAC 请求签名」防篡改**；接口服务**验签**。**v3.5 再修订（ADR-37）**：网关只判定**接口可用性**（`apiSet`）并下发身份（`userId + requestId`），**数据范围不在网关计算、也不下发**——由接口服务基于登录人自行推导。其余结论（不查权限库、不回查网关、F 必须留在接口服务）保持不变。
 
 #### 20.1.1 职责分工（谁判定、谁校验）
 
-- **网关是唯一的身份解析与判定点**：凭证解析（JWT → `userId` → 角色集）、接口可用性判定（G3）、数据范围计算（`scopeFor`，**多角色并集**，见 §19.1）全部在 `data-gateway` 完成。
-- **网关向接口服务下发身份与范围**：随请求**请求体**（不是 HTTP 头）下发 `userId + scope + requestId`。放请求体是为了不受 HTTP 头大小限制（范围明细可能达数百个 id）。
-- **接口服务「验签但不判定」**：I1 验签（服务身份 + 请求完整性，失败 401）；I2 **直接使用**网关下发的身份与范围——**不重解析身份、不重新判定 `apiSet`、不重算 `scopeFor`、不再查询权限库、不回查网关**。节点 E 仍是**网关单点判定**。
-- 一句话记忆：**签名管「是不是可信服务发的、内容有没有被改」；权限判定只在网关做一次。**
+- **网关是唯一的身份解析与授权判定点**：凭证解析（JWT → `userId` → 角色集）与接口可用性判定（G3，`apiSet` 多角色并集，§19.1）全部在 `data-gateway` 完成；**数据范围不含在内**——它由接口服务基于登录人自行推导（ADR-37）。
+- **网关向接口服务下发身份（不下发范围）**：随请求**请求体**（不是 HTTP 头）下发 `userId + requestId`，并**对这次请求签名**。
+- **接口服务「验签、且只不判接口可用性」**：I1 验签（服务身份 + 请求完整性，失败 401）；I2 **直接使用**网关下发的身份——**不重解析身份、不重新判定 `apiSet`、不再查询权限库、不回查网关**；**数据范围由接口服务按登录人自行推导并在 I4 过滤**（§19.1 / ADR-37）。节点 E 仍是**网关单点判定**。
+一句话记忆：**签名管「是不是可信服务发的、内容有没有被改」；接口可用性判定只在网关做一次，数据范围由接口服务按登录人自己推导。**
 
 #### 20.1.2 防伪：API Key + 共享密钥
 
@@ -1813,7 +1830,7 @@ v1
 X-Signature = "v1:" + Base64( HMAC-SHA256( key = shared_secret, data = 签名串 ) )
 ```
 
-- **请求体摘要必须在签名串里**：网关下发的 `userId + scope + requestId` 就在请求体里，因此**篡改数据范围或身份会直接导致验签失败**——这是本方案的核心价值。
+- **请求体摘要必须在签名串里**：网关下发的 `userId + requestId` 就在请求体里，因此**篡改身份（比如换成别人的 userId）会直接导致验签失败**——这是本方案的核心价值。
 - **唯一实现**：签名与验签只用 `common` 的 `ServiceSigner` / `ServiceVerifier`，业务代码不得自行拼接签名串（否则各服务口径漂移）。
 
 #### 20.1.4 校验步骤（被调方，在 I1 / G1 执行）
@@ -1839,16 +1856,16 @@ X-Signature = "v1:" + Base64( HMAC-SHA256( key = shared_secret, data = 签名串
 
 1. 接口服务**只存在于内网，且只接受来自网关的连接**（网络策略**默认全拒 + 白名单放行**，不允许「默认互通 + 事后封堵」）。
 2. **所有内部跳次必须验签**（§20.1.2 / §20.1.3），含「沙箱 → 网关」；验签失败一律 401，**不得降级放行**。
-3. **节点 F（行 / 列过滤）必须留在接口服务**——只有它能接触数据库、能改写查询；行范围用网关下发的 `scope`（并集口径，§19.1），列按 `sys_api.column_whitelist`。此条不受本节调整影响。
+3. **节点 F（行过滤）必须留在接口服务**——只有它能接触数据库、能改写查询；**行范围来自接口服务自己的推导**（按自己业务表的归属字段，§19.1 / ADR-37，不是网关下发的），**列由接口自己的 SQL 与返回类型写死**（没有运行时列白名单）。此条不受本节调整影响。
 4. 权限判定函数只在 `common` 实现**一份**（§4.9）；签名 / 验签也只在 `common` 实现**一份**（§20.1.3）。
-5. 网关不得接受调用方自带的 `userId` / 角色 / 范围字段；这些字段只能由网关自行推导（**验签只证明来源与完整性，不改变这条**）。
-6. 接口服务**不回查网关**、不向网关二次确认身份；网关随请求体下发的 `userId + scope` 即权威输入（不回查是本项目的明确设计，不是待优化项）。
+5. 网关不得接受调用方自带的 `userId` / 角色字段；身份只能由网关自行解析（**数据范围根本不经过网关**，也就没有「自带范围字段」这一说）（**验签只证明来源与完整性，不改变这条**）。
+6. 接口服务**不回查网关**、不向网关二次确认身份；网关随请求体下发的 `userId` 即权威输入（不回查是本项目的明确设计，不是待优化项）。**数据范围不靠下发**——由接口服务自己推导（§19.1 / ADR-37）。
 7. **密钥不得进入 URL / 日志 / Trace / 错误响应 / 模型上下文**；日志里只允许出现 `keyId`。
 
 #### 20.1.7 风险与补偿（修订后）
 
-- **已接受的剩余风险（明示）**：内网失守**且**共享密钥被读取时，攻击者仍可伪造「任意用户 + 任意范围」的内部请求。签名把门槛从「能连上内网」提高到「能拿到密钥」，但**没有消除**该风险（密钥必须存在于运行环境）。
-- **补偿措施（必做）**：① 网络策略默认全拒；② 新增接口服务必须走部署清单（服务名 + 网络策略 + `sys_api` 注册 + **密钥签发**四项齐全）；③ 接口服务把请求来源（对端 IP / 服务标识 / `keyId`）写入审计；④ 验签失败率与 `keyId` 异常使用进监控告警；⑤ 密钥定期轮换（§20.1.5）；⑥ **F 底线不依赖签名**——即使签名被绕过，行 / 列过滤仍按网关下发范围生效。
+- **已接受的剩余风险（明示）**：内网失守**且**共享密钥被读取时，攻击者仍可伪造「任意用户」的内部请求。签名把门槛从「能连上内网」提高到「能拿到密钥」，但**没有消除**该风险（密钥必须存在于运行环境）。
+- **补偿措施（必做）**：① 网络策略默认全拒；② 新增接口服务必须走部署清单（服务名 + 网络策略 + `sys_api` 注册 + **密钥签发**四项齐全）；③ 接口服务把请求来源（对端 IP / 服务标识 / `keyId`）写入审计；④ 验签失败率与 `keyId` 异常使用进监控告警；⑤ 密钥定期轮换（§20.1.5）；⑥ **F 底线不依赖签名**——即使签名被绕过，行过滤仍按**接口服务自己推导出的范围**生效。
 - **自动化探测**：骨架期仍只做「验签失败用例 + 手工核对部署清单」；完备的内网可达性自动化探测后置。
 - 落点：§0.3、§0.4、§2.2、§3.2、§4.1、§4.3、§4.8、§4.9、§4.10、§7.1、§10.1、§11.6、§13、§16-1、§17、§18.1.2、§18.1.3、§18.3、§18.4.2、§18.4.5、§18.4.7、§18.5.1、§18.6.1、§18.6.2、§18.7、§18.8 M2、§19.1、§19.7、§19.11、§19.13、§20.12、ADR-23。
 
@@ -1931,10 +1948,10 @@ X-Signature = "v1:" + Base64( HMAC-SHA256( key = shared_secret, data = 签名串
 
 ### 20.12 验收口径
 
-- **信任边界**：接口服务只接受网关连接（网络策略默认全拒）；网关不接受调用方自带的 `userId`/角色/范围；接口服务不再查询权限库、也不回查网关；服务间跳次由 API Key + HMAC 签名保证来源与完整性（§20.1）。
-- **服务间防伪防篡改**：缺 `X-Api-Key` / 签名不匹配 / 时间戳超出 ±300s / nonce 重放 → 一律 401 并产生审计与告警；篡改请求体（含 `scope`）必须被验签发现（§20.1）。
-- **F 底线**：即使前层全被绕过，接口服务按网关下发范围过滤后仍只返回有权数据（§20.1）。
-- **范围口径**：多角色用户的对象范围 = 各角色 `role_api.scope` 的并集；技能不携带范围；无任何授权来源 / 解析失败 → 403（fail-closed，§19.1）。范围 → WHERE 的翻译由接口服务按业务表归属字段完成。
+- **信任边界**：接口服务只接受网关连接（网络策略默认全拒）；网关不接受调用方自带的 `userId`/角色；接口服务不再查询权限库、也不回查网关；服务间跳次由 API Key + HMAC 签名保证来源与完整性（§20.1）。
+- **服务间防伪防篡改**：缺 `X-Api-Key` / 签名不匹配 / 时间戳超出 ±300s / nonce 重放 → 一律 401 并产生审计与告警；篡改请求体（含 `userId`）必须被验签发现（§20.1）。
+- **F 底线**：即使前层全被绕过，接口服务按**自己推导出的范围**过滤后仍只返回有权数据（§20.1 / ADR-37）。
+- **范围口径**：授权取多角色并集（可调接口）；**数据范围不落配置表、不由网关下发**，由接口服务基于登录人自行推导（`role_api.scope` 已在 V13 DROP）；推导不出来 / 缺归属信息 → 403（fail-closed，§19.1 / ADR-37）。范围 → WHERE 的翻译同样在接口服务完成（按自己业务表的归属字段）。
 - **成本**：单人超日上限只拒新对话、不中断进行中；全局超限只给降级提示（骨架期无表单，§20.2 / §20.10）。
 - **审计**：`config_audit` 可查到「谁在何时把哪个配置从什么改成了什么」；agent 侧与 I6 不一致时产生告警（§20.4 / §20.7）。
 - **保留**：长期保留可查；不含删除行为（§20.5）。

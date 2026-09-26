@@ -15,6 +15,7 @@
     <module>agent-spi</module>
     <module>platform</module>
     <module>persistence</module>
+    <module>object-storage</module>
     <module>web</module>
   </modules>
 </project>

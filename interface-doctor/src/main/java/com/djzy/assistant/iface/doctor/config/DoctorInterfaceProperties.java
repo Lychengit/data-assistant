@@ -16,7 +16,7 @@ public class DoctorInterfaceProperties {
     private Map<String, String> allowedCallers = new LinkedHashMap<>();
 
     /** nonce 存储：memory（单实例退化）或 redis。 */
-    private String nonceStore = "memory";
+    private String nonceStore = "redis";
 
     /**
      * 本服务所有业务接口的路径前缀（默认 {@code /doctor}）。
@@ -46,7 +46,7 @@ public class DoctorInterfaceProperties {
     }
 
     public void setNonceStore(String nonceStore) {
-        this.nonceStore = nonceStore;
+        this.nonceStore = nonceStore == null ? "redis" : nonceStore;
     }
 
     public String getApiPrefix() {

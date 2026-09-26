@@ -85,6 +85,14 @@ public final class GatewayToolPlane implements ToolPlane {
     }
 
     @Override
+    public List<String> skillsFor(String bearerToken) {
+        // 单独取一次能力清单（而不是把 catalogFor 的结果攒起来复用）：能力清单的调用是**每轮**都发生的，
+        // 攒起来就得给「上一轮的结果」找个存处，而那个存处是每用户一份、没有上限的内存（DR-22 那条教训）。
+        // 多一次调用换来「没有隐藏状态、没有先后顺序依赖」，值。
+        return List.copyOf(fetchCapabilities(bearerToken).viewableSkills());
+    }
+
+    @Override
     public ToolInvoker invokerFor(String bearerToken) {
         return request -> Mono.fromCallable(() -> invoke(bearerToken, request))
                 .subscribeOn(Schedulers.boundedElastic());

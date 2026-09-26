@@ -16,5 +16,6 @@
     <module>web</module>
     <module>runtime/runtime-noop</module>
     <module>runtime/runtime-agentscope</module>
+    <module>state</module>
   </modules>
 </project>

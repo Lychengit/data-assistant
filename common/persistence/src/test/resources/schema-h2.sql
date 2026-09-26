@@ -204,15 +204,3 @@ CREATE TABLE tool_call (
     created_at  TIMESTAMP NOT NULL DEFAULT now()
 );
 
--- V9 等价物：运行时状态落点（§19.5）。H2 侧 payload 用纯文本列（PG 是 jsonb），列名列序一致。
-CREATE TABLE agent_state (
-    user_id             VARCHAR(64)  NOT NULL,
-    session_id          VARCHAR(64)  NOT NULL,
-    state_key           VARCHAR(128) NOT NULL,
-    runtime_id          VARCHAR(64)  NOT NULL,
-    runtime_version     VARCHAR(64)  NOT NULL,
-    snapshot_created_at BIGINT       NOT NULL,
-    payload             VARCHAR(4000),
-    updated_at          TIMESTAMP    NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_id, session_id, state_key)
-);

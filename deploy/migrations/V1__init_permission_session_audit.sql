@@ -61,7 +61,7 @@ CREATE TABLE sys_api (
     method           VARCHAR(8)  NOT NULL DEFAULT 'read',  -- 副作用等级，不是权限（§4.6）
     resource         VARCHAR(128),
     param_schema     JSONB,
-    column_whitelist JSONB,
+    column_whitelist JSONB,                           -- 旧设计的「列白名单」；**该列已在 V13 删除**（返回哪些列由接口自己的 SQL 写死）
     enabled          BOOLEAN NOT NULL DEFAULT TRUE,
     owner_id         BIGINT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -87,7 +87,8 @@ CREATE TABLE skill_api (
 CREATE TABLE role_api (
     role_id BIGINT NOT NULL REFERENCES sys_role(id),
     api_id  BIGINT NOT NULL REFERENCES sys_api(id),
-    scope   JSONB NOT NULL,                               -- 数据范围唯一来源；多角色取并集（§19.1）
+    scope   JSONB NOT NULL,                               -- 旧设计的「数据范围唯一来源」；**该列已在 V13 删除**
+                                                         -- （范围改由接口服务基于登录人推导，§19.1 / ADR-37）
     PRIMARY KEY (role_id, api_id)
 );
 

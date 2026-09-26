@@ -4,9 +4,7 @@ import com.djzy.assistant.common.bus.AgentEventFactWriter;
 import com.djzy.assistant.common.bus.EventQueue;
 import com.djzy.assistant.common.persistence.JdbcAgentEventFactWriter;
 import com.djzy.assistant.common.persistence.PgOutboxEventBus;
-import com.djzy.assistant.common.persistence.PgRuntimeStatePort;
 import javax.sql.DataSource;
-import com.djzy.assistant.spi.RuntimeStatePort;
 import com.djzy.assistant.agentweb.tool.ToolPlane;
 import com.djzy.assistant.spi.tool.ToolCatalog;
 import com.djzy.assistant.spi.tool.ToolCategory;
@@ -37,13 +35,6 @@ public class AgentWebH2Config {
     @Primary
     public AgentEventFactWriter h2AgentEventFactWriter(DataSource dataSource) {
         return new JdbcAgentEventFactWriter(new JdbcTemplate(dataSource), false);
-    }
-
-    /** 运行时状态也用 H2 方言版（生产默认落 PG，§19.5）。 */
-    @Bean
-    @Primary
-    public RuntimeStatePort h2RuntimeStatePort(DataSource dataSource) {
-        return new PgRuntimeStatePort(new JdbcTemplate(dataSource), false);
     }
 
     /**

@@ -53,8 +53,17 @@ public class GatewayProperties {
     /** 熔断打开时长。 */
     private Duration circuitOpenDuration = Duration.ofSeconds(30);
 
-    /** nonce 存储：{@code memory}（单实例退化，§20.1.4 脚注）或 {@code redis}（多副本默认）。 */
-    private String nonceStore = "memory";
+    /**
+     * 防重放 nonce 落点：{@code redis}（默认，多副本同一口径）或
+     * {@code memory}（单实例退化，§20.1.4 脚注——多副本下防重放不完整，只能本机开发用）。
+     */
+    private String nonceStore = "redis";
+
+    /**
+     * 用户级限速计数落点：{@code redis}（默认，多副本同一口径）或
+     * {@code memory}（仅单副本；多副本各数一份，实际上限会被放大成「副本数 × qps」）。
+     */
+    private String rateLimitStore = "redis";
 
     /** 启动时校验密钥齐全（§20.1.5 缺密钥拒绝启动）。 */
     private boolean requireSecrets = true;
@@ -168,7 +177,15 @@ public class GatewayProperties {
     }
 
     public void setNonceStore(String nonceStore) {
-        this.nonceStore = nonceStore;
+        this.nonceStore = nonceStore == null ? "redis" : nonceStore;
+    }
+
+    public String getRateLimitStore() {
+        return rateLimitStore;
+    }
+
+    public void setRateLimitStore(String rateLimitStore) {
+        this.rateLimitStore = rateLimitStore == null ? "redis" : rateLimitStore;
     }
 
     public boolean isRequireSecrets() {

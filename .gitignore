@@ -5,3 +5,9 @@ target/
 node_modules/
 dist/
 *.tsbuildinfo
+
+# 本地两实例冒烟脚本的运行痕迹（实例日志 / 事件日志 / 工作区），不入库
+deploy/local-windows/.smoke/
+
+# 一键启动脚本的运行痕迹（服务日志 / 事件日志 / 工作区 / 本机对象存储），不入库
+deploy/local-windows/.local/

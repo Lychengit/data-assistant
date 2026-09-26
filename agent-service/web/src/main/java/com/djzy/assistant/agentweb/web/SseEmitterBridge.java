@@ -1,6 +1,7 @@
 package com.djzy.assistant.agentweb.web;
 
-import com.djzy.assistant.agentweb.session.JournalRecord;
+import com.djzy.assistant.agentweb.session.StreamRecord;
+import com.djzy.assistant.common.web.auth.UserContextHolder;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.concurrent.Executors;
@@ -37,13 +38,13 @@ final class SseEmitterBridge {
 
     private SseEmitterBridge() {}
 
-    static SseEmitter bridge(Flux<JournalRecord> records, Duration timeout) {
+    static SseEmitter bridge(Flux<StreamRecord> records, Duration timeout) {
         SseEmitter emitter = new SseEmitter(Math.max(1_000L, timeout.toMillis()));
         AtomicBoolean closed = new AtomicBoolean(false);
         ScheduledFuture<?> heartbeat = HEARTBEAT.scheduleAtFixedRate(
                 () -> beat(emitter, closed), HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS);
         Disposable subscription = records.subscribe(
-                record -> send(emitter, record, closed),
+                UserContextHolder.propagateConsumer(record -> send(emitter, record, closed)),
                 error -> {
                     log.warn("SSE 流异常关闭", error);
                     close(emitter, closed, heartbeat);
@@ -68,7 +69,7 @@ final class SseEmitterBridge {
         return emitter;
     }
 
-    private static void send(SseEmitter emitter, JournalRecord record, AtomicBoolean closed) {
+    private static void send(SseEmitter emitter, StreamRecord record, AtomicBoolean closed) {
         if (closed.get()) {
             return;
         }
@@ -78,7 +79,7 @@ final class SseEmitterBridge {
                     .name(record.event().type().wireName())
                     .data(record.event().payload(), MediaType.APPLICATION_JSON));
         } catch (IOException | IllegalStateException e) {
-            // 前端断开是常态（换页 / 刷新）：这里只需停止推送，答案继续在后台生成并进入回放位。
+            // 前端断开是常态（换页 / 刷新）：这里只需停止推送，答案继续在后台生成并进入状态库。
             log.debug("SSE 推送终止（客户端已断开）：seq={}", record.seq());
             closed.set(true);
         }

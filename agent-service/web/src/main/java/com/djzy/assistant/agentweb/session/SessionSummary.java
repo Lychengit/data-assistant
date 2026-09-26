@@ -1,21 +1,25 @@
 package com.djzy.assistant.agentweb.session;
 
-import com.djzy.assistant.common.sse.SseEventType;
-import java.util.List;
+import com.djzy.assistant.agentstate.PlatformSessionState;
 
 /**
- * 会话列表里的一行（§19.4 历史会话 / 断线续传用的是同一份数据）。
+ * 会话列表里的一行（§19.4 历史会话）。
  *
- * <p>**没有「会话目录」表**：标题、轮次数、时间、归档位都从回放位（{@link SessionJournal}）派生。
- * 另建一张目录表就等于给同一件事两份真相——删会话、改标题、写失败都会开始打架，
- * 而日志本来就是唯一事实源（ADR-28：历史 / 回放 / 断线续传一律从日志派生）。
+ * <p>**它是从「会话档案」派生出来的视图，不读对话正文**（这是 H-13 改的口径）。
+ * 原来每开一次列表都要把每个会话的整段对话读出来，只为了算标题、条数与最后活动时刻——
+ * 一个用户几百个会话就是几百次大对象读。现在那三个数在**提问的那一刻**就写进了档案
+ * （见 {@code PlatformSessionStore#recordQuestion}），列表只读档案。
+ *
+ * <p>于是口径上有一条要记住：**这里是索引，不是真相**。对话正文的真相始终是框架的会话状态，
+ * 历史回放（{@code /turns}）读的是它，一个字都不来自这里；档案落后（例如绕过平台直接往状态库
+ * 塞过对话）时，列表显示的是档案里的旧值——用户再问一句就跟上了。
  *
  * @param sessionId 会话号
- * @param title 首条用户提问（截断到 {@value #TITLE_MAX} 字）；没问过就是「未命名会话」
- * @param questions 用户提问条数（≈ 轮次数；HITL 确认续跑不重复计数）
- * @param createdAtMs 首条记录时刻
- * @param lastActiveMs 末条记录时刻（列表按它倒序，最近聊过的在最上面）
- * @param archived 是否已归档（最后一次归档 / 取消归档说了算，没有那条记录就是没归档）
+ * @param title 首条提问截断后的标题；没问过就是「未命名会话」
+ * @param questions 提问条数（≈ 轮次数；HITL 确认续跑不重复计数）
+ * @param createdAtMs 建档时刻
+ * @param lastActiveMs 最后一次提问的时刻（列表按它倒序，最近聊过的在最上面）
+ * @param archived 是否已归档
  * @param archivedAtMs 归档时刻；未归档为 0
  */
 public record SessionSummary(
@@ -27,68 +31,33 @@ public record SessionSummary(
         boolean archived,
         long archivedAtMs) {
 
-    /** 标题上限：再长也只是列表里的一行，截断比横向滚动友善。 */
-    public static final int TITLE_MAX = 60;
-
     private static final String UNTITLED = "未命名会话";
 
-    /** 从回放位记录派生一行摘要。 */
-    public static SessionSummary from(String sessionId, List<JournalRecord> records) {
-        Accumulator accumulator = new Accumulator();
-        records.forEach(accumulator::accept);
-        return accumulator.toSummary(sessionId);
-    }
-
     /**
-     * 边写边累积（{@link FileSessionJournal} 用）：每来一条事件就重扫整段记录会退化成 O(n²)。
+     * 由会话档案派生一行。
      *
-     * <p>折叠规则只此一份——两个日志实现共用同一个累积器，否则「文件里读出来的」和
-     * 「内存里攒出来的」迟早对不上（这种不一致最难查：同一份日志，换个实现结论就变了）。
+     * @param meta 会话档案；为空（理论上只有「列表 iterating 时档案正好被删」才会遇到）时
+     *     给一行「刚建、没问过」的空样子，而不是抛异常——列表少一行是小事，打不开列表是大事
      */
-    public static final class Accumulator {
-
-        private String title;
-        private int questions;
-        private long createdAtMs;
-        private long lastActiveMs;
-        private boolean archived;
-        private long archivedAtMs;
-
-        public synchronized void accept(JournalRecord record) {
-            if (createdAtMs == 0L || record.timestampMs() < createdAtMs) {
-                createdAtMs = record.timestampMs();
-            }
-            lastActiveMs = Math.max(lastActiveMs, record.timestampMs());
-            SseEventType type = record.event().type();
-            if (type == SseEventType.USER) {
-                questions++;
-                if (title == null) {
-                    Object text = record.event().payload().get("text");
-                    if (text != null && !String.valueOf(text).isBlank()) {
-                        title = String.valueOf(text);
-                    }
-                }
-                return;
-            }
-            if (type == SseEventType.ARCHIVED) {
-                // 后写的说了算：归档 → 取消归档 → 再归档，最后一次是什么就是什么
-                archived = Boolean.TRUE.equals(record.event().payload().get("archived"));
-                archivedAtMs = archived ? record.timestampMs() : 0L;
-            }
+    public static SessionSummary of(String sessionId, PlatformSessionState meta) {
+        if (meta == null) {
+            return new SessionSummary(sessionId, UNTITLED, 0, 0L, 0L, false, 0L);
         }
-
-        public synchronized SessionSummary toSummary(String sessionId) {
-            return new SessionSummary(
-                    sessionId, title(title), questions, createdAtMs, lastActiveMs, archived, archivedAtMs);
-        }
+        long createdAtMs = meta.getCreatedAtMs();
+        // 没问过时 lastActiveMs 是 0：用它排序会跑到列表最底下，所以退回建档时刻
+        long lastActiveMs = Math.max(meta.getLastActiveMs(), createdAtMs);
+        return new SessionSummary(
+                sessionId,
+                title(meta.getTitle()),
+                meta.getQuestions(),
+                createdAtMs,
+                lastActiveMs,
+                meta.isArchived(),
+                meta.getArchivedAtMs());
     }
 
-    private static String title(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return UNTITLED;
-        }
-        // 先 strip 再压缩空白：用户在输入框里敲的前后空格不该出现在列表标题里
-        String oneLine = raw.strip().replaceAll("\\s+", " ");
-        return oneLine.length() <= TITLE_MAX ? oneLine : oneLine.substring(0, TITLE_MAX) + "…";
+    /** 档案里没标题（还没问过、或升级前的老会话）就用统一的占位语，别在前面留一片空白。 */
+    private static String title(String stored) {
+        return stored == null || stored.isBlank() ? UNTITLED : stored;
     }
 }

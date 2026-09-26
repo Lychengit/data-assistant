@@ -39,6 +39,9 @@ import org.springframework.context.annotation.Import;
             "gateway.secrets.gateway=" + GatewayTestSupport.OUTBOUND_SECRET,
             "gateway.per-user-qps=100",
             "gateway.circuit-failure-threshold=100",
+            // 单测不依赖外部 Redis：显式退回内存实现（生产默认是 redis）
+            "gateway.nonce-store=memory",
+            "gateway.rate-limit-store=memory",
             "spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration"
         })
 @Import({GatewayTestSupport.Fakes.class, GatewayTestSupport.RecordingDownstream.class})

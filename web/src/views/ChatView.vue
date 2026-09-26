@@ -186,6 +186,14 @@ async function openSession(id: string): Promise<void> {
     }
     lastSeq.value = maxSeq;
     active = turns.value.length ? turns.value[turns.value.length - 1] : null;
+    if (active && active.status === "running") {
+      // 最后一轮**没有结束标记**：它是在**别的实例**上跑着的那一轮（§19.4 / T1-09）。
+      // 这里必须主动接上去等结果——不然用户刷新到别的实例上只会看到一个转圈的气泡，
+      // 却没有任何连接在给它送后续事件。服务端会等那一轮跑完，再把整段结果补过来。
+      // 游标清空：历史里的 seq 是「投影的第几条」，和实时流不是一套编号，换实例后带它没有意义。
+      lastSeq.value = null;
+      attach();
+    }
   } catch (error) {
     reportError(error);
   } finally {

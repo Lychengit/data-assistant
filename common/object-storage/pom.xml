@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.djzy.assistant</groupId>
+    <artifactId>common</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>common-object-storage</artifactId>
+  <name>common-object-storage</name>
+  <!-- 对象存储的 S3 兼容实现。故意单独一个模块：只有真正用得上的服务（管理端、agent-service）
+       才把它拉进依赖，网关 / 接口服务不必背上 AWS SDK 这一串包。 -->
+  <description>对象存储端口实现：S3 兼容（MinIO / 云 OSS / COS 共用一套代码）</description>
+  <dependencies>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>common-platform</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-autoconfigure</artifactId>
+    </dependency>
+  </dependencies>
+</project>

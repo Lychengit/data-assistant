@@ -3,6 +3,7 @@ package com.djzy.assistant.spi;
 import com.djzy.assistant.spi.tool.ToolCatalog;
 import com.djzy.assistant.spi.tool.ToolInvoker;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -17,8 +18,8 @@ public final class AgentRunRequest {
     private final String systemPromptPrefix;
     private final String systemPromptSuffix;
     private final ToolCatalog tools;
+    private final List<String> visibleSkills;
     private final ToolInvoker toolInvoker;
-    private final RuntimeStatePort statePort;
     private final long deadlineEpochMs;
     private final int maxIters;
     private final Map<String, Object> attributes;
@@ -30,8 +31,8 @@ public final class AgentRunRequest {
         this.systemPromptPrefix = b.systemPromptPrefix == null ? "" : b.systemPromptPrefix;
         this.systemPromptSuffix = b.systemPromptSuffix == null ? "" : b.systemPromptSuffix;
         this.tools = b.tools == null ? ToolCatalog.empty() : b.tools;
+        this.visibleSkills = List.copyOf(b.visibleSkills);
         this.toolInvoker = Objects.requireNonNull(b.toolInvoker, "toolInvoker");
-        this.statePort = Objects.requireNonNull(b.statePort, "statePort");
         this.deadlineEpochMs = b.deadlineEpochMs;
         this.maxIters = b.maxIters;
         this.attributes = Map.copyOf(b.attributes);
@@ -67,13 +68,21 @@ public final class AgentRunRequest {
         return tools;
     }
 
+    /**
+     * 这一轮该用户**可见的技能编码**（技能清单由网关单点判定，和工具面同源）。
+     *
+     * <p>为什么技能清单要单独给运行时：工具面是「能调哪些接口」，技能是「有哪些成套的做法与脚本」。
+     * 平台负责把技能**内容**放进这个用户的工作区（H-06a，见 DR-41），运行时负责让模型看见它们；
+     * 两者都只认这一份清单，不各自去猜。
+     *
+     * <p>默认空列表：测试替身与不使用技能的运行时不用改代码。
+     */
+    public List<String> visibleSkills() {
+        return visibleSkills;
+    }
     /** 唯一工具执行出口（平台实现，§9.5 / ADR-32 ③）。 */
     public ToolInvoker toolInvoker() {
         return toolInvoker;
-    }
-
-    public RuntimeStatePort statePort() {
-        return statePort;
     }
 
     public long deadlineEpochMs() {
@@ -95,8 +104,8 @@ public final class AgentRunRequest {
         private String systemPromptPrefix;
         private String systemPromptSuffix;
         private ToolCatalog tools;
+        private List<String> visibleSkills = List.of();
         private ToolInvoker toolInvoker;
-        private RuntimeStatePort statePort;
         private long deadlineEpochMs;
         private int maxIters = 10;
         private final Map<String, Object> attributes = new LinkedHashMap<>();
@@ -131,13 +140,14 @@ public final class AgentRunRequest {
             return this;
         }
 
-        public Builder toolInvoker(ToolInvoker v) {
-            this.toolInvoker = v;
+        /** 这一轮可见技能编码；传 {@code null} 等同空列表。 */
+        public Builder visibleSkills(List<String> v) {
+            this.visibleSkills = v == null ? List.of() : v;
             return this;
         }
 
-        public Builder statePort(RuntimeStatePort v) {
-            this.statePort = v;
+        public Builder toolInvoker(ToolInvoker v) {
+            this.toolInvoker = v;
             return this;
         }
 

@@ -12,7 +12,8 @@ import com.djzy.assistant.management.repo.JdbcSkillPackageRepository;
 import com.djzy.assistant.management.repo.MetricAdminRepository;
 import com.djzy.assistant.management.repo.RoleApiAdminRepository;
 import com.djzy.assistant.management.repo.SkillPackageRepository;
-import com.djzy.assistant.management.skill.SkillPackageStore;
+import com.djzy.assistant.common.storage.LocalFileObjectStorage;
+import com.djzy.assistant.common.storage.ObjectStorage;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -92,12 +93,17 @@ public final class ManagementTestSupport {
             return new JdbcSkillPackageRepository(new JdbcTemplate(dataSource), false);
         }
 
-        /** M3：技能包落临时目录，测完即弃（内容寻址，同名即同对象）。 */
+        /**
+         * M3：测试用对象存储落临时目录，测完即弃。
+         *
+         * <p>这里只替换「存储后端」这一个接缝，技能包存储的真实实现（{@code ObjectStorageSkillPackageStore}）
+         * 照常参与装配——测试覆盖的还是生产那条路径。
+         */
         @Bean
         @Primary
-        public SkillPackageStore h2SkillPackageStore() {
+        public ObjectStorage h2ObjectStorage() {
             try {
-                return new SkillPackageStore.Local(Files.createTempDirectory("skill-package-test"));
+                return new LocalFileObjectStorage(Files.createTempDirectory("object-storage-test"));
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }

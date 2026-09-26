@@ -9,16 +9,16 @@
 | 模块 | 对应规格 | 职责 |
 |--|--|--|
 | `common/platform` | §4.2 / §4.3 / §4.5 / §4.7 / §6 / §19 | 纯 Java 领域件：权限判定 `AuthorizationService`、**接口身份三元组 `ApiRoute`**、签名 `ServiceSigner`/`ServiceVerifier`、JWT（HS256，≤15min）、内部信封 `ApiEnvelope`/`ApiResult`、数字台账与算式复算、append-only 事件日志 |
-| `common/persistence` | §0.3-4 / §19.5 / §19.6 / §20.4 | PG/Redis 端口实现：权限读取、`permission_audit`、`data_access_audit`（I6）、`sys_api` 注册表、用户状态、Redis nonce、一次性确认、**事件落库通道两套实现**（`PgOutboxEventBus` 与 `RedisStreamEventQueue`，同一个 `EventQueue` 端口）、事件事实表写入（`JdbcAgentEventFactWriter`）、**运行时挂起状态落 PG**（`PgRuntimeStatePort`） |
+| `common/persistence` | §0.3-4 / §19.5 / §19.6 / §20.4 | PG/Redis 端口实现：权限读取、`permission_audit`、`data_access_audit`（I6）、`sys_api` 注册表、用户状态、Redis nonce、一次性确认、**事件落库通道两套实现**（`PgOutboxEventBus` 与 `RedisStreamEventQueue`，同一个 `EventQueue` 端口）、事件事实表写入（`JdbcAgentEventFactWriter`） |
 | `common/web` | §20.1.4 | 服务间验签过滤器 `SignatureVerificationFilter`（G1 / I1 唯一实现）、请求体缓存、验签失败审计 |
 | `agent-service/core` | §4.8 / §9 / §10 | agent 流水线与工具闸门（配额、重复调用、节点 E 前置）、SSE 投影、（运行时由 SPI 注入） |
 | `agent-service/runtime/*` | ADR-31 / ADR-32 | `runtime-noop`（测试替身）与 `runtime-agentscope`（AgentScope 2.0.3 适配） |
-| `agent-service/web` | §18.4.1 / §12 / §19.4 / §19.5 / §19.9 | agent 对外 Web 层：会话与轮次 API、**一次进入场券**、`GET /v1/agent/chat/stream`（SSE）、**HITL 挂起/确认/续跑**、轮次限速、append-only 事件日志（唯一事实源）与运行态落 PG |
+| `agent-service/web` | §18.4.1 / §12 / §19.4 / §19.5 / §19.9 | agent 对外 Web 层：会话与轮次 API、**一次进入场券**、`GET /v1/agent/chat/stream`（SSE）、**HITL 挂起/确认/续跑**、轮次限速、append-only 事件日志（审计与事实表来源）与运行态落 PG（**会话状态权威**） |
 | `interface-doctor` | §18.4.5 / §4.8 / §4.7 | 医生域接口服务：**一个接口一个端点、各自写自己的 SQL**；I1 验签 → I2 只用网关下发的 `userId`（范围由接口自己推导）→ I3 参数与口径校验 → I4 行过滤/列投影 → I5 参数化执行 + 溯源 → I6 直写审计（`RegisteredApiAspect` 切面，接口代码零审计）。启动自检「代码里的路由 ↔ `sys_api` 注册表」，不一致拒绝启动 |
 | `management-service` | §18.4.6 / §19.4 / §20.4 / §20.7 | 管理后台：M1 登录（JWT ≤15min + 一次性 refresh）、M2 角色/接口授权、M3 技能包、M4 接口注册、M5 口径字典、M6 审计/回放/监控。平台元数据与审计读走**独立只读出口**，不套范围过滤 |
 | `management-service`（模型供应商） | ADR-14 / §20.1.6 / §20.7 | 模型供应商配置：`sys_llm_provider` 存**密文**（AES-GCM，KEK 由环境注入），页面只回显 `keyHint`；同一时刻至多一个生效（服务层切换 + 部分唯一索引兜底）；每次变更写 `config_audit` |
 | `web/`（前端） | §14-11 / §18.4.6 | Vue 3 + Vite + TS 单页：登录页、对话页（步骤卡/文件卡/确认按钮/澄清选项）、管理页 M2–M6。**前端只做展示**，判定仍在网关 |
-| `deploy/` | §13 / §16 / §20.8 | `migrations/`（Flyway V1–V13）、`docker-compose.yml`（PG/Redis/MinIO/OTel/Prometheus）、OTel / Prometheus 配置 |
+| `deploy/` | §13 / §16 / §20.8 | `migrations/`（Flyway V1–V17）、**`local-windows/`（本机原生安装：MinIO + 建库脚本，见其 README）**、`docker-compose.yml`（CI / 生产参考）、OTel / Prometheus 配置 |
 
 ## 硬约束（改代码前先读）
 - **判定单点**：只有网关推导身份；接口服务验签后**直接使用**网关下发的 `userId`，不重解析身份、不查权限库、
@@ -38,7 +38,8 @@
 - **配置变更必留痕**：M2/M3/M4/M5 的每次改动与业务变更加同一个事务写 `config_audit`，带 `before/after`，审计写失败则变更回滚（§20.7）。
 - **骨架期信任边界**：进程内不写入/不改写任何权限相关状态；密钥只在环境变量 / secret 注入，缺失即**拒绝启动**（§20.1.5）。
 - **技能包不可变**：技能包按内容哈希寻址，同内容重复上传不产生第二版；只有一个「最新版本」，**不做版本并存、不做回滚**（§19.2）。
-- **事件日志是唯一事实源**：本地 append-only 日志先落盘，队列只当**落库通道**——at-least-once、按 `event_id` 幂等，
+- **两条链各有各的权威**：**会话正文**（用户问了什么、agent 答了什么）权威是框架的 `AgentState`（落 PG，见 §19.5）；
+  **事件日志**是**审计与事实表**这条链的来源——本地 append-only 日志先落盘，队列只当**落库通道**——at-least-once、按 `event_id` 幂等，
   攒批（50 条 / 100ms / 单批 ≤500）、确认后才推进位点、连续失败 >5 次进 `event_dead_letter` 并告警；
   重启时从日志追赶「投递未确认」的事件（§19.6 / ADR-28）。
 - **挂起状态不跟进程走**：HITL 挂起时把运行时快照落 PG（§19.5），重启 / 换 pod 后从快照把会话接回来续跑；
@@ -63,6 +64,10 @@ mvn -B install -N
 `agent-service-core` 11、`agent-service-web` 72、`runtime-agentscope` 16、`data-gateway` 25、
 `interface-doctor` 15、`management-service` 42、`runtime-tck` 1（合计 289）。
 
+最近一次全量复核（2026-09-26，H-13 落地后 `mvn -B clean install`）：17 个模块 BUILD SUCCESS、**449 例 0 失败**（另有 2 例真 PG 用例默认跳过；Docker 可用时还会真起容器跑 3 例沙箱用例）——
+`agent-service-web` 140、`common-platform` 73、`common-persistence` 47、`runtime-agentscope` 53、`management-service` 42、
+`data-gateway` 30、`agent-service-state` 22、`interface-doctor` 15、`agent-service-core` 11、`common-object-storage` 8、`common-web` 7、`runtime-tck` 1。
+
 前端另跑 `web/` 自己的两关（见 `web/README.md`）：
 
 ```powershell
@@ -76,9 +81,59 @@ npm run build        # vite build
 
 ## 本地联调
 
+### 本机原生（这台机器的实际跑法）
+
+这台机器的 PostgreSQL 18 / Redis / MinIO 都是**原生进程**：PG 装在 `D:\PostgreSQL`，Redis 是本机服务，MinIO 用 `deploy/local-windows/` 的脚本装在 `D:\minio`。Docker Desktop 也已可用（2026-09-26 修好并验证：引擎 27.0.3、`hello-world` 通过；修法见 `deploy/local-windows/README.md`）。
+
+```powershell
+# 1) 对象存储：装一次（下载 + 校验 + 注册登录自启 + 建好桶 doctor-assistant）
+cd deploy\local-windows
+.\install-minio.ps1
+.\minio-status.ps1                       # 之后看状态就跑它
+
+# 2) 建库：本机原生 PG 没有容器那套 initdb 入口，用这个脚本按序 apply deploy\migrations
+.\apply-migrations.ps1 -User postgres -Password '<本机 PG 口令>'
+
+# 3) 一键把整套跑起来（仓库根目录）：后端 4 个 + 前端，起来后自动开浏览器
+#    停止用 .\stop-local.bat；日志在 deploy\local-windows\.local\logs\（细节见 deploy\local-windows\README.md）
+.\start-local.bat
+```
+
+MinIO 控制台：<http://127.0.0.1:9001>（默认 `djzy / djzy-minio`，仅开发机）。
+⚠️ MinIO 社区版已被官方归档，本机装的是 GitHub Releases 上最后一个开源版本，**只用于开发**；
+生产换仍在维护的对象存储即可（走 `ObjectStorage` 端口）。详见 `deploy/local-windows/README.md`。
+
+### 多副本（≥2 实例）：会话不粘实例，A / B / C 怎么成立
+
+实例内存里只留「正在跑的这一轮的回放位」（有界、可淘汰），**其余全部读共享存储**——所以请求落到哪台都行：
+
+| 用户看到的场景 | 靠什么成立 |
+| :-- | :-- |
+| **A** 断线重连（含被丢到别的实例） | 换券后若本实例手里没有这一轮，就**追共享总线**把持有它的实例正在产出的内容**实时**接着往下发（H-01）；总线读不到（单实例 `memory`、老数据、总线故障）才退回「等它跑完再整段补」（明示降级，见 TASKS.md 的 L-02）。等待有窗口上限，超时如实收尾，**绝不空挂一条不说话的连接** |
+| **B** 换台实例继续聊（发起新一轮） | 会话存不存在 / 聊过什么 = PG 里的框架 `AgentState`；券与轮次坑位 = Redis；本实例句柄丢了现建一个空壳即可 |
+| **C** 实例挂了会话还在 | 同一份共享状态；正在跑的那一轮用「开始标记 + 坑位无人占」判定为中断，历史与实时流说同一句「本轮没跑完，请重发」 |
+| 同一会话并发提问 | 跨副本轮次坑位（Redis `SET NX PX`，释放时比对持有者）+ 状态库 CAS 兜底（真撞上也不互相覆盖）；抢不到当场回「上一轮还在处理中」 |
+
+两个实例共用同一套 PG / Redis / MinIO 的**一键冒烟**（会真的起两个进程、走 A / B / C 检查项）：
+
+`@powershell
+cd deploy\local-windows
+.\two-instance-smoke.ps1 -JwtSecret '<与两实例 AGENT_JWT_SECRET 相同>' -DbPassword '<本机 PG 口令>'
+`@
+
+自动化版是 `AgentWebMultiInstanceTest`（两个 `ChatService` 共享存储、闸门与总线，`mvn -B test` 会跑），
+它覆盖：换实例读同一份历史、跨实例换券、跨实例**实时**接流、硬挂后的中断说明。
+跨实例实时这条靠的是平台实现的框架 `MessageBus`（`RedisMessageBus` 默认 / `InMemoryMessageBus`，`agent-service.live-bus` 一个开关）：
+跑这一轮的实例每下发一条事件就往总线记一条，接流端按游标追着读，于是回答**边跑边到**（不是等跑完）——总线只是加速用的临时数据，权威永远在 PG 的 `AgentState` 里。
+停止也复用这条总线（H-09）：`POST .../stop` 先写共享的信号键（兜底，保证最迟下一次事件也会停），再往总线的停止频道推一条；持有那一轮的实例收到就**当场取消**，不用等它下一次产出。
+取消打的是框架 `interrupt(userId, sessionId)`——**必须带会话身份**：无参那个（框架已标 `@Deprecated`）打的是默认槽位，表现是「界面停了、模型照跑」（真跑一个慢模型实测出来的，见 TASKS.md 的 DR-48），所以这条有专门的回归用例守着。
+设计结论见规格书 **ADR-35**（§0.3-10/13 / §8.4 / §19.4 / §19.5 / §19.6）；「框架已有的用框架」这条实现口径见 **ADR-36**；**跨副本实时续看**见 **ADR-38**；**数据范围归属**见 **ADR-37**（网关只判定接口可用性并下发身份、不算也不下发范围，范围由接口服务基于登录人自行推导）。
+
+### 容器方式（CI / 生产参考）
+
 ```powershell
 cd deploy
-docker compose up -d postgres redis minio otel-collector prometheus   # 首次启动会执行 migrations/ 下的 V1–V9
+docker compose up -d postgres redis minio otel-collector prometheus   # 首次启动会执行 migrations/ 下的 V1–V17
 
 # 管理后台（M1/M2/M3/M4/M5/M6）
 $env:MANAGEMENT_JWT_SECRET = "<与网关 GATEWAY_JWT_SECRET 相同的登录令牌密钥>"
@@ -89,8 +144,14 @@ $env:MANAGEMENT_DB_PASSWORD = "assistant"
 $env:MANAGEMENT_READONLY_DB_URL = "jdbc:postgresql://localhost:5432/doctor_assistant"
 $env:MANAGEMENT_READONLY_DB_USER = "assistant_ro"
 $env:MANAGEMENT_READONLY_DB_PASSWORD = "<只读账号口令>"
-# M3 技能包落盘目录（内容哈希寻址；不配则用工作目录下的 data/skill-packages）
-$env:MANAGEMENT_SKILL_PACKAGE_DIR = "<技能包存放目录>"
+# M3 技能包等共享文件的存放位置（内容哈希寻址）。
+# 单副本本机开发用 local（默认，落 ./data/object-storage）；多副本部署必须用 s3（MinIO / 云 OSS / COS）。
+$env:OBJECT_STORAGE_PROVIDER = "s3"
+$env:OBJECT_STORAGE_S3_ENDPOINT = "http://127.0.0.1:9000"
+$env:OBJECT_STORAGE_S3_ACCESS_KEY = "<access key>"
+$env:OBJECT_STORAGE_S3_SECRET_KEY = "<secret key>"
+# 可选：桶名（默认 doctor-assistant）、区域（默认 us-east-1）、桶内统一前缀（默认空）
+$env:OBJECT_STORAGE_S3_BUCKET = "doctor-assistant"
 # 模型 API Key 的加密根密钥（Base64 的 32 字节，§20.1.6）：openssl rand -base64 32
 # 不配也能启动，但管理端**无法保存**模型密钥（查看不受影响）——绝不退化成明文落库
 $env:MANAGEMENT_LLM_KEK = "<KEK>"
@@ -99,15 +160,23 @@ mvn -B spring-boot:run -pl management-service
 # agent-service（会话 / SSE / 一次性入场券）
 $env:AGENT_JWT_SECRET = "<必须与 MANAGEMENT_JWT_SECRET 相同，否则登录令牌过不了入口>"
 $env:AGENT_SERVICE_SECRET = "<agent-service 调网关时用的服务密钥；网关侧同名 keyId 必须配同一个>"
-# 限流计数走 Redis（§2.3：计数一律 Redis，多副本同口径；默认 memory 只适合单副本）
+# 限流计数走 Redis（§2.3：计数一律 Redis，多副本同口径；代码与 yml 的默认值本来就是 redis，只有单副本本机开发才应显式改成 memory）
 $env:AGENT_RATE_LIMIT_STORE = "redis"
 $env:AGENT_DB_URL = "jdbc:postgresql://localhost:5432/doctor_assistant"   # 只用于查 sys_user.status
 $env:AGENT_DB_USER = "assistant"
 $env:AGENT_DB_PASSWORD = "assistant"
 $env:AGENT_TICKET_STORE = "redis"        # 多副本必须 redis；单实例内存券无法保证跨实例一次性
 $env:AGENT_EVENT_LOG_DIR = "<append-only 事件日志目录>"
-$env:AGENT_STATE_STORE = "pg"            # 挂起/快照落 PG（§19.5）；只有单副本骨架才改 file
-$env:AGENT_STATE_DIR = "<agent 运行态目录>"   # 仅 state-store=file 时使用
+# 日志文件不会只增不减（§19.6 / ADR-28）：到 `AGENT_EVENT_LOG_MAX_BYTES` 就换一个文件接着写，
+# 「已确认投递且超过 `AGENT_EVENT_LOG_RETENTION`」的记录才裁掉；维护由每个实例自己的调度器按
+# `AGENT_EVENT_LOG_MAINTENANCE_INTERVAL_MS` 跑（它只碰自己的文件，不需要分布式锁）。
+# 注意裁剪的前提是「已确认投递」——还没送进队列的记录，多旧都不会删。
+$env:AGENT_EVENT_LOG_MAX_BYTES = "268435456"          # 单文件上限，默认 256 MB
+$env:AGENT_EVENT_LOG_RETENTION = "7d"                 # 已确认记录的保留窗口，默认 7 天
+$env:AGENT_EVENT_LOG_MAINTENANCE_INTERVAL_MS = "60000"  # 维护间隔，默认 1 分钟
+# 会话状态（含 HITL 挂起快照）**只有落 PG 一种走法**（§19.5，见 `agent-service/state`）；
+# 没有 `state-store=file` 这种开关——状态落本地会让会话被钉死在一台机器上，多副本下续聊会静默失效。
+$env:AGENT_WORKSPACE_DIR = "<agent 工作目录>"   # 只放运行痕迹；不放会话状态
 $env:AGENT_GATEWAY_URL = "http://localhost:8080"   # 留空 = 骨架期不接数据面，模型调不到任何工具
 # 事件落库通道（§19.6）：redis-stream（规格里的路径：XADD 投递 / XREADGROUP 消费 / XPENDING 退避）
 # / pg-outbox（默认；只有 PG 也能跑）/ none（只写本地 append-only 日志）
@@ -272,8 +341,36 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
 - §19.6 / ADR-28 事件总线落地：`EventQueue` 端口 + `PgOutboxEventBus`（`event_outbox` 表，事件本体进 `jsonb`、`event_id` 唯一，重复投递不产生第二行）
 - §19.6 落库消费者 `EventPersistConsumer`：攒批（50 条 / 100ms / 单批 ≤500，一批一事务）→ 幂等写入事实表 `conversation_turn` / `agent_step` / `tool_call`（`ON CONFLICT DO NOTHING`）→ 确认推进位点；失败退避重试（数据库时钟判定），>5 次转 `event_dead_letter` 并计入水位
 - §19.6 进程重启从日志追赶「投递未确认」的事件重新入队（`LogFirstEventPublisher.redeliverPending`），队列只做落库通道、不做唯一副本
-- §19.5 运行时状态落 PG：`RuntimeStatePort` → `PgRuntimeStatePort`（`agent_state`，按 `user_id / session_id / state_key` 三元组寻址、覆盖写）；一次落地同时解决 HITL 恢复 / 重启恢复 / 换 pod 恢复 / 断线续传
+- §19.5 会话状态落 PG：**用框架扩展自带的 `AgentStateStore` 实现**（`agent-service/state` 的 `PlatformAgentStateStore` 装饰 `agentscope-extensions-jdbc` 的 `JdbcAgentStateStore`；表 `agentscope_sessions`，框架按**槽位号** `<userId>:<sessionId>` + `state_key` 寻址，`version` 做乐观并发）——平台只补了框架漏掉的一处「按 key 删除」，其余一律委托（ADR-36 ①）；HITL 挂起快照以 `state_key = platform_turn` 共存于同一张表（另有 `platform_session` / `platform_turn_live`）；一次落地同时解决 HITL 恢复 / 重启恢复 / 换 pod 恢复 / 断线续传
 - §19.9 / §12.1 HITL 闭环：需要确认的操作按中立事件上报 → 投影成**对话气泡内的确认卡**（不是弹窗）→ 挂起时把运行时快照落 PG → `POST /sessions/{id}/confirm` 消费确认并**续跑同一运行时会话**；确认只能用一次（重复确认 409，不绕过、不重放）
+- H-04 工作区共享（2026-09-26）：会话状态之外的第二块「不能跟进程走」的东西——agent 的工作区（技能 `SKILL.md` 与配套脚本、被写下的文件）。
+  `agent-service.workspace-store=jdbc` 时接到共享 PG 表 `agentscope_store`（框架 `RemoteFilesystemSpec` + 框架自带的 `JdbcStore`，平台不写一行存储逻辑），
+  隔离粒度是**用户**（`IsolationScope.USER`）；默认 `none` 与改造前逐字一致，真正用上它的是 H-06a（技能下发）。
+- H-06a 技能内容下发与发现（2026-09-26）：网关给出「这个人现在能看见哪些技能」，agent 拿这份清单去**管理端的表**问
+  「每个技能算数的是哪一版」（该技能下最新的一条 `published`，不是最新那一条——上传了没发布的不算），再从**对象存储**取包、解包写进
+  **这个用户自己的工作区** `skills/<编码>/`。之后「有哪些技能、正文是什么」全交给**框架自带的 `WorkspaceSkillRepository`**：
+  平台只写文件，不拼提示词、不维护第二份清单。开关 `agent-service.workspace-skills`（`none` 默认 / `workspace`）；每轮都同步一次
+  （授权随时会被收走），但**版本没变时只花一次工作区读 + 一次批量 SQL**，不进对象存储；撤销会把技能文件清干净，
+  下发失败只记日志、不影响这一轮对话（DR-41，落地说明见 `doc/refactor/TASKS.md` §6）。
+- H-05 沙箱装配（2026-09-26，**默认关着**）：把「命令在哪儿跑」变成一个开关（`agent-service.sandbox.enabled`）。开着时容器当 agent 的
+  主文件系统（`DockerFilesystemSpec`），`skills/` 这类**必须跨实例看到同一份**的前缀仍走共享库（路由表复用框架的 `RemoteFilesystemSpec`，
+  键位与 H-04 远端模式逐字相同），壳工具随之放行；关着时与改造前**逐字一致**（没有容器、没有壳工具）。打开后启动期自检探 `docker version`，
+  拿不到就**拒绝启动**——不退回本机执行（「以为隔离了、其实没隔离」比启动失败危险得多）。容器里**不放**技能正文（技能正文走路由读共享库；投影进容器的是技能脚本，H-06b），
+  详见 DR-44 与下端「沙箱（H-05）」。
+  隔离粒度是**用户**（一个用户一个容器槽位），这条假设有用例钉着：`SandboxIsolationTest` 6 例（不需要 Docker）证明
+  「平台造出来的沙箱上下文确实带 `USER`」「不同用户不会捡到对方的沙箱、同一个用户换会话仍回到自己那台」——把隔离粒度改成 `AGENT`，它们会立刻变红；
+  H-11 又加 1 例，用真中间件驱动，钉住「先拿锁 → 建容器 → 整轮跑完松手」（手写 release 会录成「只拿不还」，见 DR-51b）。
+- H-08 AG-UI 调研结论（2026-09-26，**只验证不替换**）：`agentscope-agui-spring-boot-starter` 是**前端事件协议**（把框架 typed event 翻成
+  `RUN_STARTED` / `TEXT_MESSAGE_*` / `TOOL_CALL_*` / `STATE_*` / `REASONING_*` 推给 AG-UI 客户端），所以不替换自研 SSE 层：§12.2 的
+  `intent` / `skill_start` / `skill_step` / `sandbox_job` / `artifact` / `clarify` 与 `final` 的溯源标注 / figures 在它那里**没有语义位**（只能塞 `CUSTOM`）；
+  它也不管权威与持久化 / 跨副本续看 / 轮次互斥 / 入场券 / 审计（入口只有 `POST /agui/run` 与 `/agui/run/{agentId}`）；
+  它的 SSE **既没有 `event:` 名也没有 `id:`**（拿不到 `Last-Event-ID`），而且默认 `interruptOnDisconnect=true`（一断线就把这一轮打断）。
+  结论与逐条对照表见 `doc/refactor/TASKS.md` §6「H-08 调研说明」与 DR-50。
+- H-11 沙箱跨实例执行锁（2026-09-26，**已完成；跟着沙箱开关默认打开**）：沙箱开着时，**同一个用户同时只放一轮**进容器——拿不到锁的那一轮等一会儿，等不到就按超时失败。
+  动手前先核实掉一条旧结论：台账原来写「接执行锁会**替换**框架自带的进程内实现」，实际上 2.0.3 里**框架默认就不锁**（`SandboxExecutionGuard` 的默认值是 `noop`），所以这是**纯新增**。
+  底座直接用框架扩展里的 `JdbcSandboxExecutionGuard`，锁的后端**跟着数据库方言走**（生产 PG = `pg_try_advisory_lock`，锁挂在连接上、进程崩了自动松；测试 H2 = 一张锁表），
+  平台只负责把它挂到 `DockerFilesystemSpec.executionGuard(...)` 上。不想要就关（单实例试跑）`agent-service.sandbox.distributed-lock=false`，等锁上限 `agent-service.sandbox.lock-timeout`（默认 `5m`）。
+  两条代价（记在 L-22）：后到的那一轮要等、等不到就失败；PG 这条路整轮占一条连接，所以同时在跑脚本的用户数不能超过连接池。详见 DR-51 / DR-51b 与 `doc/refactor/TASKS.md` §6「H-11 落地说明」。
 - §19.5 / §19.14 进程重启或换 pod 后，运行时句柄没了也能从 PG 快照把会话接回来续跑（`runtime.resume`）；快照缺失一律 409，**不凭空当作用户已确认**
 - §6.3 / §18.5.5 数字台账与算式复算（`common/platform/ledger`）
 - §18.4.6 M3 技能包管理：上传（内容哈希寻址，同内容不产生第二版）→ 自动检查（告警不阻断，阻断项才拦）→ 人工评审（只评最新版）→ 发布成不可变版本；绑定只读接口的技能自动可用，绑定写接口的自动 `rejected` 并记 `reviewer=system`；停用保留包但吊销绑定
@@ -285,14 +382,26 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
   既不静默放行也不退回本地计数——那正是 §2.3 要根治的隐性单点
 - §14-11 `web/` 前端：登录页（失败只显示统一措辞）、对话页（**左侧历史会话列表**，点一下切回旧会话接着聊）、管理页 M2–M6 +「模型供应商」；换券重连（券一次性，所以原生 `EventSource` 自动重连会 401，必须换新券）；
 输入框 **Enter 发送、Shift+Enter 换行**，输入法组合态放行（中文选词那一下不会把半截拼音发出去）
-- §19.4 历史会话：`GET /v1/agent/sessions`（只回自己的，按最后活动倒序，标题取首条提问）+ `GET /v1/agent/sessions/{id}/turns`（按轮次回放**原始事件**，前端用与实时流同一个归约器渲染，所以历史会话和刚答完的那一轮长得一样）；别人的 sessionId 一律 404（§11.3）。
-  会话列表**没有单独的表**：标题 / 轮次数 / 时间都从回放位派生，另建目录表就等于给同一件事两份真相
+- §19.4 多副本会话管理（ADR-35）：**会话不粘实例**——状态与历史只有一份权威（框架 `AgentState`，落 PG），
+  实例内存只留「这一轮的回放位」；同一会话跨副本同时只允许一轮（Redis 轮次坑位 + CAS 兜底）；
+  跨实例重连**降级为「等本轮结束再整段补」**（有窗口上限、超时如实收尾）；实例硬挂时那一轮在历史与实时流里都有
+  「没跑完，请重发」的说明；共享单例 agent（键 = 工具面 + 模型 + 迭代上限，每轮注入提示词与回调、每轮结束清 slot 缓存）
+- §19.4 stop：`POST /v1/agent/sessions/{id}/stop`（停**单轮**、已产出保留、幂等；请求落到非持有实例也能生效——
+  停止信号走共享存储；持有那一轮的实例上还会**实时**收到一条总线推送（H-09），所以它是当场取消，不用等下一个流事件。推送跟着 `agent-service.live-bus` 走，没有额外开关。
+  取消同时会**真的打断模型循环**（框架的 `interrupt` 按会话身份打；喊错槽位会变成「界面停了、模型照跑」，见 DR-48 与 `TurnInterruptTest`））
+- §19.4 历史会话：`GET /v1/agent/sessions`（只回自己的，按最后活动倒序）+ `GET /v1/agent/sessions/{id}/turns`。
+  列表**走的是一条轻路径**：标题（首条提问截断）/ 提问条数 / 最后提问时刻都在**提问那一刻**写进会话档案
+  （`platform_session`），所以列表一次对话正文都不读；**历史回放照旧读框架的 `AgentState`**——档案只是列表的索引，
+  正文才是真相（升级前的老会话没有档案，列表照旧显示它，只是标题为「未命名会话」、条数为 0）；
+  别人的 sessionId 一律 404（§11.3）。**历史直接来自 `AgentState`**（框架状态文档的投影，`SessionTranscript`），
+  不再另存一份会话台账——所以「换实例接着看历史」天然成立。投影规则：每轮第一个 `TextBlock` 是用户原话，
+  思考块出 `think` 步骤、助手文本出 `token`、工具调用出 `tool` 卡，每轮末尾补 `done`。
+  投影是**有损**的（见 TASKS.md L-09）：逐字回放与心跳类过程事件不在历史里，需要时查审计日志。
 - §19.4 归档（类比 Codex）：`POST /v1/agent/sessions/{id}/archive`。**归档是逻辑标记，不是删除**——
-  规格把「归档与召回」列为后置能力、骨架期记录长期保留（§8.3 / §20.5），所以这里只往唯一事实源追加一条
-  `SESSION_ARCHIVED` 事件：会话与它的每一轮回答都原样还在，历史照样回放，取消归档就能接着聊。
-  归档位**不落任何目录表**，而是由 `SessionSummary` 从回放位折叠出来（最后一次归档 / 取消归档说了算，
-  归档时刻就是写下那条记录的时刻），因此重启后仍在；列表接口回全部会话 + `archived` 标记，
-  由前端分成「在用 / 已归档」两段（归档不改变归属，别人的会话照样 404）。
+  规格把「归档与召回」列为后置能力、骨架期记录长期保留（§8.3 / §20.5），会话与该轮回答原样都在，取消归档就能接着聊。
+  归档位存在 `platform_session`（框架状态里的 key，见 T1-05）：**只存算不出来的东西**（建档时刻 + 归档标记），
+  标题 / 提问条数 / 最后活跃时间全部从 `AgentState` 现算，避免同一件事两个真相（DR-28）；
+  列表接口回全部会话 + `archived` 标记，由前端分成「在用 / 已归档」两段。
   `conversation_session.status` 目前没有任何写入路径，等它的投影接上时归档要顺带同步。
 - §8.4 / §12.2 新增中立事件 `USER_MESSAGE` → SSE `user`：用户的提问是**平台侧**发出的（运行时不会把正文放进 `TURN_START`），
   没有它 `conversation_turn.user_input` 永远是空、历史会话没有标题，而且这段正文确实进了模型请求却无法从日志重建（ADR-28 ③）
@@ -357,6 +466,7 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
 
 1. `skill-execution-service`（S0–S7，骨架期内嵌 agent-service，§19.11）+ `sandbox-runner`（`network("none")`）
 2. agent-service 可观测性（指标/链路导出，`AGENT_EVENT_LOG_DIR` 目前只落 append-only 事件日志）与 agent-service 侧 Flyway 接入
+   —— 指标那一格**目前是空壳**（`EventQueueMetrics.noop()` / `LogFirstEventMetrics`），用户 2026-09-26 明确先不做，台账记在 **H-14**
 3. RocketMQ 版队列：`EventQueue` 端口已就位（`pg-outbox` / `redis-stream` 两套实现已落地），
    换 RocketMQ 只要重写 `poll / ack / nack / deadLetter / stats`，消费者与业务代码不动（§19.6 / ADR-10）
 4. `management-service` M7，以及反馈接口——前端 `final` 卡片上的 👍/👎 后端**没有**对应接口，界面已注明只做本地记录
@@ -365,7 +475,7 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
 7. `runtime-agentscope` 的**完整 TCK**（需要确定性模型桩或真实端点）。仓库默认配置仍是 `noop` + `tck-passed-runtimes=noop`——
    那是准入闸门（§18.11.6），不是「没做完」；本机为了让对话真的走模型，是用环境变量把 `agentscope` 显式加进准入选单的
    （见「接入大模型」一节），属于刻意的本地覆盖。模型侧接线已完成并有单测覆盖（解析 / 切换 / 解密 / 无配置报错 / 能力面基线）
-8. Flyway 接入：迁移目前由部署脚本按序 apply（`deploy/migrations/V1–V14`）
+8. Flyway 接入：迁移目前由部署脚本按序 apply（`deploy/migrations/V1–V17`）
 9. 模型偶发英文过程旁白：DeepSeek 在**调工具前**会先说一句英文（如 I will query last month outpatient visits），
    这句走 `TEXT_BLOCK`，既进步骤卡、也随 `token` 流进答案气泡。提示词已写明「全程中文、不写过程旁白」，
    实测仍未完全压住（纯对话轮没有该现象，只在调工具的轮次出现）。更稳的做法在投影层而不是提示词：
@@ -377,7 +487,7 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
 
 ## 数据库迁移：已在本地 PostgreSQL 实测
 
-`deploy/migrations/` 下 **V1–V14** 已在本地 PostgreSQL 18 空库上全量跑通（旧文档里「有 Docker 后再验证」这条已完成）：
+`deploy/migrations/` 下 **V1–V17** 已在本地 PostgreSQL 18 空库上全量跑通（旧文档里「有 Docker 后再验证」这条已完成）：
 
 ```powershell
 # 建库（口令按本地实际改）
@@ -396,16 +506,62 @@ M3 上传 → 重复上传同内容只有一行 → 评审发布 → `config_aud
 >5 次转死信后队列里不再有它、事实表按 `event_id` 重放三次仍只有一行、一轮对话结束后队列被搬空（pending 归零）。
 `?::jsonb` 绑定与 `BIGINT = varchar` 这类**只有真 PG 才会暴露**的问题就是在这一步抓出来的（H2 会静默放过）。
 
-运行时挂起状态（V9 的 `agent_state`）同样在真库上验过：三元组寻址不串门、同一段重复保存是覆盖而不是追加、
-`jsonb` 载荷（数字 / 文本 / 布尔）原样往返、换实例能读到同一份状态（「不跟进程走」）、删除只删这一段。
+工作区共享（V17 建的 `agentscope_store`）也在真库上验过，而且**建表用的就是迁移脚本的原文**（不是用例里另抄一份 DDL）：
+两台「实例」（两个存储对象、连同一个库）任意写任意读都看得见；同一个文件的抢写只有一个赢（旧版本号写不进），另一次被拒绝且不落库。
 
+会话状态（V16 建的 `agentscope_sessions`，实现来自框架扩展）同样在真库上验过：按「槽位号 + 状态键」寻址不串门、同一段重复保存是覆盖而不是追加、
+载荷（数字 / 文本 / 布尔）原样往返、换实例能读到同一份状态（「不跟进程走」）、删除只删这一段；
+带 `version` 的 CAS 写入在并发下不会互相覆盖（旧行版本对不上就拒绝写，而不是「最后写的赢」）。
+
+多副本这件事最后是在**真进程 + 真库**上收口的（T1-15，2026-09-26）：本机建库 `doctor_assistant`（这台机器的 PG 只有 `postgres` 一个角色，
+所以迁移与冒烟脚本用 `-User postgres`），16 个迁移从 V1 到 V17 按序全部应用；随后 `deploy/local-windows/two-instance-smoke.ps1`
+起两台真实例（8081 / 8082，noop 运行时）把 10 项全跑绿：A 建会话 → B 看到 A 建的会话 → B 跨实例换券 → B 读历史 →
+拿 B 的券到 A 接流（535 / 594 ms 正常收尾，不空挂）→ A 起一轮真的跑 → 这一轮跑完 → **事件进了共享总线** → A 停止（幂等）；H-04 又加了一项「两台实例都装配成共享工作区」（看启动日志，因为工作区平面现在关着、没有接口能观察到它），**10 项 PASS / 0 项失败**。
+这次真跑还抓出两个「只有真跑才会暴露」的问题，都已修掉：迁移脚本原来按文件名字符串排序（`V10` 会排在 `V2` 前面，从零建库必然失败）、
+冒烟脚本原来只杀 Maven 进程（`spring-boot:run` fork 出来的应用 JVM 成了孤儿，既占端口又挂着输出管道，调用方永远等不到脚本结束）。
+
+跨副本**实时**续看（H-01，2026-09-26）另有三层证据：`RedisMessageBusTest` 3 例对着**本机真 Redis** 跑（
+游标不重不漏 / 超过日志上限裁掉老条目 / 跨实例订阅能收到推送）；`CrossInstanceTurnRelayTest` 4 例，
+新增的那条钉的是「别台正在产出的内容会实时补上来，而且跑完时不重复整段补」；`AgentWebMultiInstanceTest` 5 例。
+全量 17 模块 BUILD SUCCESS、**413 例 0 失败**（截至 H-06b；H-05 是 405 例、H-06a 是 394 例、H-04 是 364 例、H-01 是 351 例；H-09 之后为 **421 例**，随后 L-21 验证那批用例把全量推到 **426 例**，H-11 落地后为 **431 例**，H-13 落地后为 **449 例 0 失败**）。
+四张 `SpringBootTest` 显式把总线钉回 `memory`，单测结果不被本机 Redis 的有无牵着走。
+
+真进程那一层也补上了：`two-instance-smoke.ps1` 现在会**真的跑一轮**，然后直接到共享 Redis 上找这一轮的总线条目——
+为什么不看接口：走接口时「从总线实时读到」与「等跑完整段补」给用户的画面是一样的，只有看键才能证明**发布**这条路真的走了。
+实测两台实例启动日志都打出「跨副本实时总线：Redis」；日志键是 Redis list、TTL 7193 s ≈ 2 小时（与 `Duration.ofHours(2)` 一致）；
+另有 `agent-service:bus:seq` 这个**不带 TTL** 的条目号计数器——它必须比条目活得久，否则重启后新条目的号会倒回去，游标就乱了。
+
+停止也走了这条总线（H-09，2026-09-26）：`POST .../stop` 现在**先写信号键、再推一条**——信号键（带 TTL）保证「最迟下一次事件也会停」，
+推送负责「快」。证据这一层，`ChatServiceTest` 里有两条刻意**不推任何流事件**：只要推送生效，`cancelReasons` 里就会出现 `user_stop`；
+`TurnStopChannelTest` 4 例中有 1 例对着**真 Redis** 跑（A 实例推、B 实例收），另 3 例钉住「字段不全被忽略」「订阅方抛异常不带崩发布方」。
+真进程那一层，冒烟脚本复跑仍是 **10 项全 PASS**（停止项验的是幂等，默认档行为没有变化）。
+
+工作区共享（H-04，2026-09-26）同样有真机证据，分两层：**真库**这一层，`PlatformWorkspaceStorePgTest` 直接跑 `V17` 迁移脚本建表，
+再让两个存储对象连同一个库互相读写（跨实例看得见、抢写只有一个赢）；**真进程**这一层，冒烟脚本把两台实例的 `AGENT_WORKSPACE_STORE` 设成 `jdbc`，
+启动日志里各打出「工作区存储：共享库（表 agentscope_store）」，表不存在时实例会直接启动失败——这一条同时钉住了「迁移跑过」。
+为什么不看接口：工作区平面现在还关着（技能与子代理都没开），没有任何接口会去读写它，能观察到的只有装配日志。
+接线是否真的生效，则由 `SharedWorkspaceTest` 在**真 `HarnessAgent`** 上验：甲实例写进工作区的文件，乙实例读得到（同一个人换会话仍可见、换个人看不见）。
+
+技能下发（H-06a，2026-09-26）的证据分两层。**用例这一层**：`WorkspaceSkillProvisionerTest` 9 例（下发 / 不重写 / 撤销删干净 / 版本升级覆盖写…）、
+`RegistrySkillPackageSourceTest` 8 例（「最新一条 `published`」的各种边界）、`SharedWorkspaceTest` 与 `ChatServiceTest` 各 2 例（接线与开关）、
+以及 `SkillProvisioningIntegrationTest` 2 例——它把三样都换成**生产那一套**（真表 + 部署时装的对象存储 Bean + 共享工作区表），
+下发一个已发布的技能之后，**另一个存储对象 / 文件系统**读得到同样的文件；顺带钉住「打开 `workspace-skills=workspace` 应用照样起得来」。
+**真进程这一层还没做**：`two-instance-smoke.ps1` 跑的是 `noop` 运行时（本机没有可用的模型服务），技能下发挂在 AgentScope 运行时的每一轮开始处，
+所以它不会被那个脚本碰到。要补这一层，需要一台能跑模型的环境 + 先在管理端真发布一个技能包。
+技能**投影进容器**（H-06b，2026-09-26）的证据也分两层。**用例这一层**（不需要 Docker）：`SandboxSkillStagingTest` 3 例
+（按用户抄到本机、共享库删了本地也删、身份里的特殊字符不互相撞也跳不出暂存根、没技能时不造空目录）＋`SandboxWiringTest` 11 例
+（开关关着时行为逐字不变；开着时每轮落盘并把「用这个目录当投影源」的 `SandboxContext` 交给框架；投影目录名与共享前缀一致；
+H-11 的执行锁确实挂在**两层**装配对象上、沙箱关着时即使传了锁也被归一化成不带锁）。
+**真容器这一层**：`SandboxDockerEndToEndTest` 2 例真起 `ubuntu:22.04`，钉住「技能投影进容器后 `sh /workspace/skills/demo/scripts/run.sh` 真的打出预期输出」，
+以及「**每轮必须先清沙箱状态**」——容器是一轮一个，而框架按内容哈希记「投影做过一次」，不清的话第二轮容器里就没有脚本文件了（见 TASKS.md L-20）。
+打开方式与限制见上面「沙箱（H-05）」。
 模型供应商配置（V10 的 `sys_llm_provider`）也在真库上验过：写入的是密文、明文在库外解出、
 页面与审计只出现 `keyHint`、启用新的会自动关掉旧的（部分唯一索引兜底）、非法适配器在写入期就被 400 挡下。
 
 ## 事件落库通道（§19.6 / ADR-28）：两套实现，一个端口
 
-队列只是**把事件搬到 PG 事实表的通道**；唯一事实源始终是本地 append-only 日志（`AGENT_EVENT_LOG_DIR`，
-必须挂真实卷）。换队列实现不动消费者、不动业务代码，只换 `EventQueue` 的装配：
+在这条链上，队列只是**把事件搬到 PG 事实表的通道**；事实表的源头始终是本地 append-only 日志（`AGENT_EVENT_LOG_DIR`，
+必须挂真实卷）。**注意**：这条链负责的是审计与事实表，不是会话正文——用户与 agent 说了什么由框架的 `AgentState` 权威保存（见 §19.5）。换队列实现不动消费者、不动业务代码，只换 `EventQueue` 的装配：
 
 | `AGENT_EVENT_BUS` | 实现 | 什么时候用 |
 | --- | --- | --- |
@@ -488,6 +644,39 @@ $env:AGENT_TCK_PASSED = "noop,agentscope"
 不是配置项。切换后每轮按**当前启用中的供应商**解析模型（引用串形如 `deepseek:deepseek-flash`），
 **每轮直查、零缓存**，所以换模型 / 改端点不必重启。
 
+### 沙箱（H-05）：命令在哪儿跑，是一个开关（默认关）
+
+`HarnessAgent` 自带 `shell_execute`，而它**默认**的文件系统是「本机 + 壳」——命令直接跑在应用服务器上。
+平台的做法不是「关掉就完事」，而是把这个能力接到**容器**上，再用一个开关决定要不要开（默认 `false`）：
+
+| 变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `AGENT_SANDBOX_ENABLED` | `false` | `true` = 容器当 agent 的主文件系统（命令在容器里跑）。默认档与改造前逐字一致：没有容器、没有壳工具 |
+| `AGENT_SANDBOX_IMAGE` | `ubuntu:22.04` | 容器镜像；本地没有时 `docker run` 会自己拉 |
+| `AGENT_SANDBOX_WORKSPACE_ROOT` | `/workspace` | 容器里的工作区根目录；**命令的工作目录就是它**（所以容器侧一律用工作区相对路径，见 L-18） |
+| `AGENT_SANDBOX_MEMORY_BYTES` / `AGENT_SANDBOX_CPU_COUNT` | `0` | 单容器资源上限；**0 = 不限制** |
+| `AGENT_SANDBOX_NETWORK` | 空 | 容器接入的 Docker 网络；空 = Docker 默认 |
+| `AGENT_SANDBOX_SHARED_PREFIXES` | `skills/` | 仍然读写**共享库**（PG）的工作区前缀，逗号分隔。必须**目录边界写法、逐个枚举**：写成 `/` 一条都匹配不上（L-15） |
+| `AGENT_SANDBOX_DISTRIBUTED_LOCK` | `true` | 跨实例执行锁（H-11）：**同一个用户同时只放一轮进容器**。锁的后端跟着数据库方言走（生产 PG = advisory lock、进程崩了自动松；测试 H2 = 一张锁表）。单实例试跑可以关掉 |
+| `AGENT_SANDBOX_LOCK_TIMEOUT` | `5m` | 等锁上限；等不到就让这一轮失败并报错（不无限挂着）。只在 `AGENT_SANDBOX_DISTRIBUTED_LOCK=true` 时有用 |
+
+打开后三件事同时发生：①容器当主（模型跑脚本碰不到宿主机）；②`shared-prefixes` 里那些路径照旧走共享库，多副本看到同一份；
+③壳工具被放行——**这是唯一故意偏离 ADR-31 基线的地方**，所以它必须显式打开，而且白名单那一步会再挡一次：没开沙箱时框架就算把它塞进来也会被移掉。
+
+还有一道**跟着沙箱开关一起走的**保护（H-11，上表最后两行）：**同一个用户同时只放一轮进容器**。因为沙箱槽位按用户分，
+而「这个槽位上现在是哪个容器」就记在槽位里——两轮几乎同时开始时，两边都还看不到对方，于是各起一个容器、后写的状态把先写的覆盖掉，
+**而且不报任何错**。所以沙箱一开锁默认就开：后到的那一轮等一会儿，等不到就按超时失败（不无限挂着）。
+
+**打开前必须确认 Docker 可用**：启动期自检探一次 `docker version`，拿不到就**拒绝启动**。为什么不是「起不来就退回本机跑」——
+那样最坏的情况是运维以为脚本被隔离了，实际它以 agent 服务的身份跑在宿主机上。关着的时候**连探测都不做**（不给不相关的部署加前置条件）。
+
+两条边界要知道：**①容器里的技能是「投影」进去的**（H-06b）——技能正文留在共享库（`skills/` 走路由）、模型按需读，
+技能脚本则由平台每轮抄到本机后交给框架投影进容器，所以脚本在容器里跑得动。投影的落点必须与模型看到的路径一致
+（`<工作区根>/skills/<技能>`，工作区根默认 `/workspace`），否则模型会照着一个容器里不存在的路径去跑脚本。
+想跑脚本的话，光开沙箱还不够：技能下发（`AGENT_WORKSPACE_SKILLS=workspace`）也要开着——没有技能就没有可投影的东西。
+**②本机是 Windows 时另有一条环境限制**——`docker exec` 会吃掉双引号分组（L-19），框架「往容器里写文件」在 Windows 上会失败，
+真实使用请在 Linux 上跑（本机只用来验证「命令确实在容器里执行」，真容器用例就是这么做的）。
+
 ### 运行时基线（ADR-31）：四条「不写就一定会悄悄坏掉」的规矩
 
 `runtime-agentscope` 外壳里包的是 `HarnessAgent`，它**默认自带一整套能力**。这四条是实测踩出来的，
@@ -499,7 +688,7 @@ $env:AGENT_TCK_PASSED = "noop,agentscope"
    框架将来偷偷加工具也进不来。
 2. **记忆/压缩钩子必须关**。默认开启时每轮会**多调一次模型**（实测每轮 2 次调用：一次答问、一次偷偷
    「抽取记忆」）。这些调用不在平台成本上报里、也不在事件流里。
-3. **工作目录必须钉在 `state-dir` 下**。默认按 cwd 建 `.agentscope/`，实测会把**会话原文与记忆账本写进应用
+3. **工作目录必须钉在 `workspace-dir` 下**。默认按 cwd 建 `.agentscope/`，实测会把**会话原文与记忆账本写进应用
    启动目录**（仓库根）——既是数据外泄，也是仓库污染。
 4. **模型侧的 HTTP 失败要翻译成「去哪儿改」**。401/403/404 是运维改一个字段就能好的事，不能和真故障
    共用一句「服务暂不可用，请稍后再试」；翻译只吐写死的常量文本，**上游回包一个字都不带出去**

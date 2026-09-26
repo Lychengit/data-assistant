@@ -9,7 +9,7 @@ CREATE TABLE data_access_audit (
     user_id        VARCHAR(64)  NOT NULL,
     api_code       VARCHAR(64)  NOT NULL,
     skill_code     VARCHAR(64),
-    scope_snapshot JSONB,                             -- 本次使用的数据范围快照（多角色并集，§19.1）
+    scope_snapshot JSONB,                             -- 本次实际用到的过滤条件（由接口服务填；范围管理落地前为空，§19.1）
     outcome        VARCHAR(24)  NOT NULL,             -- ALLOW / DENY / ERROR
     reason         VARCHAR(255),
     row_count      INT,

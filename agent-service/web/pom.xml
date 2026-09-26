@@ -16,6 +16,11 @@
       <groupId>com.djzy.assistant</groupId>
       <artifactId>agent-service-core</artifactId>
     </dependency>
+    <!-- 会话状态落 PG：实现框架 AgentStateStore 契约，多副本共享同一份会话（§19.5） -->
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>agent-state-store</artifactId>
+    </dependency>
     <dependency>
       <groupId>com.djzy.assistant</groupId>
       <artifactId>runtime-noop</artifactId>
@@ -34,9 +39,25 @@
       <groupId>io.agentscope</groupId>
       <artifactId>agentscope-extensions-model-openai</artifactId>
     </dependency>
+    <!-- 会话状态落 PG / H2 的现成实现（框架扩展）：不自己再写一遍 CAS 存储（台账 T1-13）。
+         方言按 DataSource 自动识别，所以生产 PG 与测试 H2 走的是同一份代码。 -->
+    <dependency>
+      <groupId>io.agentscope</groupId>
+      <artifactId>agentscope-extensions-jdbc</artifactId>
+    </dependency>
     <dependency>
       <groupId>com.djzy.assistant</groupId>
       <artifactId>common-persistence</artifactId>
+    </dependency>
+    <!-- 技能包内容从对象存储取（H-06a）：复用公共那份端口 + S3/local 两种实现，不自己写一套。 -->
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>common-object-storage</artifactId>
+    </dependency>
+    <!-- 统一身份上下文：拦截器 + @CurrentUser 参数解析器 + ThreadLocal 持有器（§4.8 / 20.1.6-5）。 -->
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>common-web</artifactId>
     </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>

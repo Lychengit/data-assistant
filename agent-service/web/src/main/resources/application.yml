@@ -33,20 +33,86 @@ agent-service:
   turn-deadline: ${AGENT_TURN_DEADLINE:5m}
   stream-timeout: ${AGENT_STREAM_TIMEOUT:10m}
   turns-per-minute: ${AGENT_TURNS_PER_MINUTE:30}
-  # 多副本必须改成 redis（单实例内存券无法保证跨实例一次性）。
-  ticket-store: ${AGENT_TICKET_STORE:memory}
-  # 限流计数落点（§2.3：计数一律 Redis，禁止本地内存计数）；memory 只留给单副本骨架场景。
-  rate-limit-store: ${AGENT_RATE_LIMIT_STORE:memory}
+  # 入场券落点：redis（默认，多副本必须用——单实例内存券无法保证跨实例一次性）或 memory（仅本机开发）。
+  ticket-store: ${AGENT_TICKET_STORE:redis}
+  # 限流计数落点（§2.3：计数一律 Redis，禁止本地内存计数；各数一份会让额度放大成「副本数 × 配置值」）。
+  # memory 只留给单副本骨架场景，多副本部署必须保持 redis。
+  rate-limit-store: ${AGENT_RATE_LIMIT_STORE:redis}
+  # 停止信号落点：redis（默认，多副本必须用，否则停止打不到别的实例上）或 memory（仅本机开发）。
+  # 它是一把「带 TTL 的键」，谁跑到这一轮的实例就在下一个流事件上看到它（正确性靠这个兜底）。
+  stop-signal-store: ${AGENT_STOP_SIGNAL_STORE:redis}
+  # 轮次闸门的落点：redis（默认，多副本必须用——内存版拦不住落到别的实例上的并发请求）或 memory（仅本机开发）。
+  # 它管的是「同一个会话同时只能跑一轮」；坑位带 TTL，实例被硬杀时到点自动过期，不需要人工清理。
+  turn-gate-store: ${AGENT_TURN_GATE_STORE:redis}
+  # 跨副本实时续看的总线（H-01）：redis（默认，多副本必须用）或 memory（仅本机开发 / 单副本，会退化成
+  # 「等整轮跑完再整段补」）。它记的是「这一轮正在产出什么」（带 TTL 的临时数据），跑这一轮的实例每下发一条
+  # 就记一条，重连落到别的实例时那边按游标追着读——回答因此是边跑边到的，而不是最后一次性出现。
+  # 会话正文的权威仍然是 PG 里的框架状态（AgentState），两者不是一回事，见 LiveTurnChannel 的说明。
+  #
+  # 顺手也当「停止推送」的底座（H-09）：点停止的实例往这条总线推一条，每个实例常驻订阅，收到就当场
+  # 取消本地那一轮，不用等下一个流事件（原来跨实例停止要等事件，见 TASKS.md L-07）。设成 memory 时
+  # 推送只在本进程生效：跨实例停止仍然成立（走上面那个带 TTL 的信号键），只是回到「下一个事件才停」。
+  live-bus: ${AGENT_LIVE_BUS:redis}
+  # 追实时的间隔：隔多久去总线上取一批新事件。模型是逐字返回的，200 毫秒一批用户感知不到差别，
+  # 换来的是不需要「订阅推送」那一层（有序、不重不漏、不用去重与排序）。
+  live-bus-poll-interval: ${AGENT_LIVE_BUS_POLL_INTERVAL:200ms}
   thinking-visibility: ${AGENT_THINKING_VISIBILITY:step_card_only}
   event-log-dir: ${AGENT_EVENT_LOG_DIR:./data/eventlog}
-  state-dir: ${AGENT_STATE_DIR:./data/agent-state}
-  # 运行时状态落点（§19.5）：pg = 挂起/快照落 PG，SSE 可落任意副本、换 pod 不丢状态；
-  # file = 本地卷 JSON，只留给单副本骨架场景（多副本会变成隐性单点，§2.3）。
-  state-store: ${AGENT_STATE_STORE:pg}
+  # 会话日志的维护（§19.6 / ADR-28）：没这三项的话，日志文件只增不减，时间长了会把磁盘占满，
+  # 而它正是审计的唯一事实源。三件事一次做完：落盘 → 裁剪 → 滚动 → 清理留档（每台实例只管自己的文件，不需要分布式锁）。
+  # 单文件上限：到这个大小就滚动（旧文件带上时间戳留档，新文件接着写）。
+  event-log-max-bytes: ${AGENT_EVENT_LOG_MAX_BYTES:268435456}
+  # 保留窗口：**已确认投递**且比它更旧的记录才可以裁掉（默认 7 天）。
+  # 注意「已确认投递」这个前提：还没送进队列的记录多旧都不会删——删了就是丢事件。
+  event-log-retention: ${AGENT_EVENT_LOG_RETENTION:7d}
+  # 维护间隔（毫秒）；默认 1 分钟。它由 EventLogMaintenanceScheduler 按名字直接读——
+  # @Scheduled 要在容器起来之前就把间隔解析出来，所以这一项不进 AgentServiceProperties（与 event-persist-interval-ms 同一个规矩）。
+  event-log-maintenance-interval-ms: ${AGENT_EVENT_LOG_MAINTENANCE_INTERVAL_MS:60000}
+  # 会话句柄（ChatSession）的内存缓存条数，LRU 淘汰：被淘汰丢的只是内存里的「本轮回放位」，
+  # 历史在 PG 的 AgentState 里，下次请求会重新读起来，不会丢数据。
+  session-cache-size: ${AGENT_SESSION_CACHE_SIZE:512}
+  # 运行时的工作目录：只放这份部署自己的临时痕迹。
+  # 会话状态一律落 PG（没有开关可切），多副本才读得到同一份会话，详见 AgentServiceConfig#agentStateStore。
+  workspace-dir: ${AGENT_WORKSPACE_DIR:./data/agent-workspace}
+  # 工作区（agent 的文件空间：技能与配套脚本）落在哪儿：none（默认，本机磁盘，多副本各是各的）或
+  # jdbc（放共用的库，表 agentscope_store，多副本看到同一份）。改这一项不用改代码，见 PlatformWorkspaceStore。
+  workspace-store: ${AGENT_WORKSPACE_STORE:none}
+  # 技能下发（H-06a）：none（默认，模型看不到任何技能）或 workspace（把「这个用户可见的技能」的最新
+  # 已发布版本同步进他的工作区，框架自带的工作区技能仓库据此把它们列给模型；技能按人隔离）。
+  # 开了它一般也要把 workspace-store 设成 jdbc，否则多副本下「哪台下发过」全看运气。
+  workspace-skills: ${AGENT_WORKSPACE_SKILLS:none}
+  # 沙箱（H-05）：命令要不要放到容器里跑。默认**关着**——关着时没有执行面（没有容器、也没有壳工具），
+  # 模型能用的只有平台注册的工具，与改造前行为一致。
+  # 打开后：容器成为 agent 的主文件系统（命令在容器里跑，碰不到宿主机），下面 shared-prefixes 那些
+  # 路径仍然读写共享库，多副本看到同一份；沙箱里的壳工具同时被放行（跑脚本就是它的用途）。
+  # 打开前必须确认 Docker 可用：启动时会自检（拿不到 docker version 直接拒绝启动，
+  # 不会"悄悄退回本机跑"——"以为隔离了、其实没隔离"比启动失败危险得多）。见 TASKS.md DR-43 / DR-44。
+  sandbox:
+    enabled: ${AGENT_SANDBOX_ENABLED:false}
+    # 镜像不存在时框架调 docker run 会自己拉；换镜像只动配置。
+    image: "${AGENT_SANDBOX_IMAGE:ubuntu:22.04}"
+    workspace-root: "${AGENT_SANDBOX_WORKSPACE_ROOT:/workspace}"
+    # 单容器资源上限；0 = 不限制（配置里用 0 而不是留空：留空会让数字类型的绑定报错）。
+    memory-bytes: ${AGENT_SANDBOX_MEMORY_BYTES:0}
+    cpu-count: ${AGENT_SANDBOX_CPU_COUNT:0}
+    # 容器接入的 Docker 网络名；留空 = Docker 默认。
+    network: "${AGENT_SANDBOX_NETWORK:}"
+    # 仍然读写共享库（PG）的工作区前缀：目录边界写法、逐个枚举、逗号分隔。
+    # 写成单个斜杠不会匹配任何路径（框架按前缀逐条比对），这是实测过的坑，见 TASKS.md L-15。
+    shared-prefixes: "${AGENT_SANDBOX_SHARED_PREFIXES:skills/}"
+    # 跨实例执行锁（H-11）：同一个用户同时只允许一轮真的在容器里跑。沙箱的隔离槽是按用户分的，
+    # 关掉它则「同一个用户的两轮并发」会各起一个容器、后写的状态覆盖先写的（L-21 记的就是这个行为）。
+    # 锁的后端跟着数据库方言走：生产 PG = advisory lock（进程挂了自动松），测试 H2 = 一张锁表。
+    # 代价两条：抢不到的那一轮要等（等不到按超时失败）；PG 那条路会占一条连接，时长 = 这一轮沙箱活着的时间，
+    # 所以「同时在跑脚本的用户数」不能超过连接池大小。单实例试跑时可以关掉。
+    distributed-lock: ${AGENT_SANDBOX_DISTRIBUTED_LOCK:true}
+    # 等锁上限：等不到就让这一轮失败并报错（不无限挂着）。只在 distributed-lock 打开时有用。
+    lock-timeout: ${AGENT_SANDBOX_LOCK_TIMEOUT:5m}
   instance-id: ${AGENT_INSTANCE_ID:}
   # 落库通道（§19.6）：redis-stream = XADD 投递 / XREADGROUP 消费 / XPENDING 退避，死信仍写 PG 的
   # event_dead_letter；pg-outbox = 事件入队 event_outbox；none = 只落本地 append-only 日志
-  # （日志本来就是唯一事实源，队列只是搬到事实表的通道）。
+  # （append-only 日志是审计与事实表这条链的来源，队列只是把事件搬进事实表的通道；
+  #  会话正文的权威是框架的 AgentState，两者职责不同，见 doc/refactor/TASKS.md DR-18 / DR-28）。
   # 生产按 §19.6 走 redis-stream；骨架期默认 pg-outbox 是为了「只有 PG 也能跑」，不留隐性中间件依赖。
   event-bus: ${AGENT_EVENT_BUS:pg-outbox}
   # Redis Stream 名（event-bus=redis-stream 时才用）；多环境共用一个 Redis 时必须各用各的。
@@ -56,6 +122,20 @@ agent-service:
   # 模型 API Key 的解密根密钥（Base64 的 32 字节，§20.1.6）。
   # 必须与管理端的 MANAGEMENT_LLM_KEK 是同一把：密文是管理端写的，这里只负责解。
   llm-kek: ${AGENT_LLM_KEK:}
+
+object-storage:
+  # 技能包的存放处：agent 侧只读（写者仍然是管理端）。本机开发用 local（与服务端同一个目录），
+  # 多副本 / 生产用 s3（MinIO 等 S3 兼容存储）。切换只动配置，不动代码，见 ObjectStorageConfig。
+  provider: ${OBJECT_STORAGE_PROVIDER:local}
+  root-dir: ${OBJECT_STORAGE_ROOT_DIR:./data/object-storage}
+  key-prefix: ${OBJECT_STORAGE_KEY_PREFIX:}
+  s3:
+    endpoint: ${OBJECT_STORAGE_S3_ENDPOINT:}
+    region: ${OBJECT_STORAGE_S3_REGION:us-east-1}
+    access-key: ${OBJECT_STORAGE_S3_ACCESS_KEY:}
+    secret-key: ${OBJECT_STORAGE_S3_SECRET_KEY:}
+    bucket: ${OBJECT_STORAGE_S3_BUCKET:doctor-assistant}
+    path-style: ${OBJECT_STORAGE_S3_PATH_STYLE:true}
 
 logging:
   level:

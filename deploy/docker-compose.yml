@@ -1,4 +1,13 @@
-# 骨架期本地环境（§13）：PG + Redis + MinIO + OTel Collector + Prometheus
+# 容器化编排（§13）：PG + Redis + MinIO + OTel Collector + Prometheus
+#
+# ⚠️ 定位：**CI / 生产参考**，不是本机日常开发路径。
+# 本机的 PG / Redis / MinIO 都按**原生进程**跑（不占容器资源），这套编排主要给 CI / 生产用；
+# 原生跑法、安装与启停脚本见 deploy/local-windows/README.md。
+# （Docker Desktop 本机也已可用，2026-09-26 修好；想用容器跑这一套也行。）
+#
+# 另外注意：minio/minio 官方镜像随社区版一起被归档，未必还拉得动。
+# 生产换成仍在维护的对象存储即可——对接走 ObjectStorage 端口，业务代码不受影响（见 T0-08）。
+#
 # 注意：agent-service / data-gateway / 接口服务 / management-service 的容器定义在各自模块
 # 具备 Spring Boot 启动类后补入；skill-execution-service 骨架期内嵌 agent-service（§19.11）。
 version: "3.9"

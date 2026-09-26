@@ -20,8 +20,9 @@ interface-doctor:
   # 密钥由环境变量 / docker-compose secret 注入，缺失即拒绝启动（§20.1.5）。
   allowed-callers:
     gateway: ${IFACE_DOCTOR_GATEWAY_SECRET:}
-  # 多副本必须改为 redis（§20.1.4-3），否则防重放不完整。
-  nonce-store: ${IFACE_DOCTOR_NONCE_STORE:memory}
+  # 防重放 nonce 落点：redis（默认，多副本同一口径，§20.1.4-3——各存一份就认不出别处用过的 nonce）
+  # 或 memory（仅本机开发 / 单副本）。
+  nonce-store: ${IFACE_DOCTOR_NONCE_STORE:redis}
   # 本服务业务接口的路径前缀：既是验签保护范围，也是启动自检的边界。
   api-prefix: ${IFACE_DOCTOR_API_PREFIX:/doctor}
   # 单次查询返回行数上限：超出即截断并标注，防止把模型上下文打爆（§4.8）。

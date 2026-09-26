@@ -8,8 +8,6 @@ import com.djzy.assistant.common.llm.ApiKeyCipher;
 import com.djzy.assistant.common.llm.LlmProviderConfig;
 import com.djzy.assistant.common.persistence.JdbcLlmProviderStore;
 import com.djzy.assistant.spi.AgentRunRequest;
-import com.djzy.assistant.spi.RuntimeStatePort;
-import com.djzy.assistant.spi.Snapshot;
 import io.agentscope.core.model.Model;
 import java.util.Optional;
 import java.util.UUID;
@@ -145,21 +143,6 @@ class ConfiguredModelProviderTest {
                 .sessionId("s-1")
                 .requestId("r-1")
                 .toolInvoker(ignored -> Flux.empty())
-                .statePort(new NoopStatePort())
                 .build();
-    }
-
-    private static final class NoopStatePort implements RuntimeStatePort {
-
-        @Override
-        public Optional<Snapshot> load(String userId, String sessionId, String key) {
-            return Optional.empty();
-        }
-
-        @Override
-        public void save(String userId, String sessionId, String key, Snapshot snapshot) {}
-
-        @Override
-        public void delete(String userId, String sessionId, String key) {}
     }
 }

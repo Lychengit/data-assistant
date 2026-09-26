@@ -45,6 +45,22 @@ public interface AgentRuntimePort {
      */
     AgentSession resume(String sessionId, Snapshot snapshot, AgentRunRequest request);
 
+    /**
+     * 一轮结束后释放本实例为这个会话留下的临时开销（**不影响持久化状态，也不等于关闭会话**）。
+     *
+     * <p>为什么单开一个方法而不是复用 {@link #close(AgentSession)}：两者的语义完全不同。
+     * {@code close} 是「这个会话句柄我不要了」；而「一轮跑完了」是**每轮都会发生**的事——
+     * 框架的共享 agent 会按 {@code (userId, sessionId)} 缓存会话状态与权限引擎，
+     * 这些表没有上限，不清就等于「访问过的会话数」决定内存占用（DR-22）。
+     * 把它放在 close 里，调用方要么每轮 close（语义错、还可能把共享 agent 关掉），
+     * 要么永远不清（内存无界），两条路都是错的。
+     *
+     * <p>默认空实现：不支持这个概念的运行时（如测试替身 noop）不用改代码。
+     */
+    default void release(AgentSession session) {
+        // 默认什么都不做
+    }
+
     /** 释放会话资源（不删除持久化状态）。 */
     void close(AgentSession session);
 }

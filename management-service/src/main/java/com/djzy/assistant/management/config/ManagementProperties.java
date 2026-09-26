@@ -27,9 +27,6 @@ public class ManagementProperties {
     /** 审计 / 平台元数据的只读出口（§18.4.6）；不配置时退化为「主连接 + 只读会话」。 */
     private ReadOnly readOnly = new ReadOnly();
 
-    /** 技能包存放目录（内容寻址命名 `sha256-<hash>.zip`，§19.2）；生产应指向对象存储挂载点。 */
-    private String skillPackageDir = "./data/skill-packages";
-
     /**
      * 模型 API Key 的加密根密钥（Base64 编码的 32 字节，§20.1.6）。
      *
@@ -84,14 +81,6 @@ public class ManagementProperties {
 
     public ReadOnly getReadOnly() {
         return readOnly;
-    }
-
-    public String getSkillPackageDir() {
-        return skillPackageDir;
-    }
-
-    public void setSkillPackageDir(String skillPackageDir) {
-        this.skillPackageDir = skillPackageDir;
     }
 
     public String getLlmKek() {

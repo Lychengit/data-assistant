@@ -61,12 +61,7 @@ public final class LogFirstEventPublisher implements EventPublisher {
         return delivered;
     }
 
-    /** 定时 fsync + 裁剪（由平台的调度器以分布式锁驱动，§2.3）。 */
-    public void maintenance() {
-        eventLog.flush();
-        eventLog.trimAcked();
-    }
-
+    /** 底下的本地日志：定时维护（落盘 / 裁剪 / 滚动 / 清理留档）由它自己做，见 {@code AppendOnlyEventLog#maintenance()}。 */
     public AppendOnlyEventLog eventLog() {
         return eventLog;
     }

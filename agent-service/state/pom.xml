@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>com.djzy.assistant</groupId>
+    <artifactId>agent-service</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+  <artifactId>agent-state-store</artifactId>
+  <name>agent-state-store</name>
+  <description>平台侧的会话状态读写口（轮次快照 / 会话档案 / 轮次开始标记），与框架的会话状态共用同一张表（§19.5）</description>
+  <!--
+    为什么单独一个模块：这里的东西是「平台自己在会话状态里存的那几段」（轮次快照 / 会话档案 /
+    轮次开始标记），都写在框架的 AgentStateStore 契约之上。放进 common-persistence 会让网关 /
+    管理端 / 接口服务统统被迫引入 AgentScope；放进 agent-service/web 又会让「状态怎么用」和
+    「HTTP 怎么接」混在一个模块里。单独一个模块，依赖关系一眼可见。
+
+    框架自己的落点实现（PG / H2 的 JDBC store）由 agent-service/web 直接引框架扩展
+    （agentscope-extensions-jdbc），本模块只认 AgentStateStore 这个接口——所以换存储不动这里。
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>agent-spi</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.agentscope</groupId>
+      <artifactId>agentscope-core</artifactId>
+    </dependency>
+    <!-- 框架的 JDBC 方言与存储实现：会话状态落 PG / H2 的能力直接用它，不自己写（T1-13）。 -->
+    <!--
+      为什么还要 harness：框架的 JDBC 方言（AbstractJdbcDialect）同时充当**沙箱锁策略**，
+      它的方法签名里就带着 harness 的 SandboxLease。少了 harness，方言在运行时一加载就 NoClassDefFoundError。
+    -->
+    <dependency>
+      <groupId>io.agentscope</groupId>
+      <artifactId>agentscope-harness</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.agentscope</groupId>
+      <artifactId>agentscope-extensions-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!--
+      真实 PG 的集成测试要自己建连接（PlatformWorkspaceStorePgTest）：默认跳过，只有显式给
+      -Dtest.pg.url 时才连真库。生产运行时的驱动由服务侧（spring-boot-starter-jdbc + 各服务自己的
+      驱动依赖）提供，这里只给测试用。
+    -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+  </dependencies>
+</project>

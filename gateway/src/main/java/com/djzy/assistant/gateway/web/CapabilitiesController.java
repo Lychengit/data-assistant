@@ -2,25 +2,19 @@ package com.djzy.assistant.gateway.web;
 
 import com.djzy.assistant.common.api.ApiDescriptor;
 import com.djzy.assistant.common.api.ApiRegistry;
-import com.djzy.assistant.common.error.UnifiedErrors;
-import com.djzy.assistant.common.identity.UserIdentity;
-import com.djzy.assistant.common.identity.UserStatusPort;
-import com.djzy.assistant.common.identity.UserTokenVerifier;
 import com.djzy.assistant.common.permission.ApiCapability;
 import com.djzy.assistant.common.permission.AuthorizationService;
 import com.djzy.assistant.common.permission.Capabilities;
+import com.djzy.assistant.common.web.auth.CurrentUser;
+import com.djzy.assistant.common.web.auth.UserContext;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -33,34 +27,18 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class CapabilitiesController {
 
-    private final UserTokenVerifier tokenVerifier;
-    private final UserStatusPort userStatusPort;
     private final AuthorizationService authorizationService;
     private final ApiRegistry apiRegistry;
 
-    public CapabilitiesController(
-            UserTokenVerifier tokenVerifier,
-            UserStatusPort userStatusPort,
-            AuthorizationService authorizationService,
-            ApiRegistry apiRegistry) {
-        this.tokenVerifier = tokenVerifier;
-        this.userStatusPort = userStatusPort;
+    public CapabilitiesController(AuthorizationService authorizationService, ApiRegistry apiRegistry) {
         this.authorizationService = authorizationService;
         this.apiRegistry = apiRegistry;
     }
 
     @GetMapping(path = "/v1/permission/capabilities", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<Object> capabilities(
-            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization) {
-        String userId = tokenVerifier
-                .verifyAuthorizationHeader(authorization)
-                .map(UserIdentity::userId)
-                .orElse(null);
-        if (userId == null || !userStatusPort.isActive(userId)) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of("error", UnifiedErrors.UNAUTHORIZED));
-        }
+    public ResponseEntity<Object> capabilities(@CurrentUser UserContext userContext) {
+        // 身份与账号状态由 UserContextInterceptor 统一验过（没验过根本进不来），这里只做业务
+        String userId = userContext.userId();
         Capabilities capabilities = new Capabilities(
                 userId,
                 List.copyOf(authorizationService.viewableSkills(userId)),

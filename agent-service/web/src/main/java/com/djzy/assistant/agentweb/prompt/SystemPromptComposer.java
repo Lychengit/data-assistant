@@ -56,7 +56,6 @@ public final class SystemPromptComposer {
         prompt.append('\n');
         appendCapabilities(prompt, catalog);
         prompt.append("【硬约束】\n");
-        prompt.append("- 数据范围（能看哪些科室、哪些医生）由网关按登录人的角色推导，你无法指定，也不必询问用户。\n");
         prompt.append("- 只用工具返回的数据作答。没有返回的数据不得编造、不得推测，也不要用「通常」「大约」补空。\n");
         prompt.append("- 用户说的相对时间就用上面已解析的值；该口径确实没有数据，就直说「该口径无数据」，不要自行换一个月份代替用户决定。\n");
         prompt.append("- 「本轮可用接口」是**这一轮唯一权威**的能力清单，每轮刷新；它可能比你前几轮看到的少（授权被撤销立即生效）。\n");

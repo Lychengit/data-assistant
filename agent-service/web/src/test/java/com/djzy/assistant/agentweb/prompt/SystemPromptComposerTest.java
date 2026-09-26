@@ -34,10 +34,12 @@ class SystemPromptComposerTest {
     }
 
     @Test
-    void 提示词重申数据范围与不编造这两条硬约束() {
+    void 提示词重申不编造与只用中文这两条硬约束() {
         String prompt = SystemPromptComposer.compose(NOW, ToolCatalog.empty());
 
-        assertThat(prompt).contains("数据范围").contains("由网关按登录人的角色推导");
+        // 数据范围这条表述已删除（DR-17）：该能力尚未落地，写在提示词里只会让模型对用户
+        // 承诺一件平台做不到的事。将来真做了范围过滤，再按落地形态写回去。
+        assertThat(prompt).doesNotContain("数据范围");
         assertThat(prompt).contains("不得编造");
         assertThat(prompt).contains("全程用中文");
     }

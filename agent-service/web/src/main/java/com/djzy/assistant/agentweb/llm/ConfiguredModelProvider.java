@@ -55,6 +55,21 @@ public final class ConfiguredModelProvider implements ModelProvider {
         return ModelRegistry.resolve(adapter.modelRef(config.model()), context);
     }
 
+    /**
+     * 共享 agent 的缓存键里那一截「模型的身份」（T1-06）。
+     *
+     * <p>拼的是**决定模型行为的全部配置**：供应商 id、适配器、模型名、以及「要不要推理原文」。
+     * 少了任何一项，都会出现「管理端换了模型，共享 agent 还在用旧的」——因为键没变，
+     * 框架就把旧的 agent 交给了这一轮。密钥与地址不进键：它们变了应该重启/重建，
+     * 而把密文拼进内存里的键也没有任何好处。
+     */
+    @Override
+    public String modelKeyFor(AgentRunRequest request) {
+        LlmProviderConfig config = store.findEnabled().orElseThrow(NoModelConfiguredException::new);
+        return config.providerId() + '/' + config.adapter() + '/' + config.model() + "/thinking="
+                + wantsReasoning(request);
+    }
+
     /** 逐轮取请求属性，缺省回退到平台级设置（个人设置项落地前，先由全局配置兜着）。 */
     private boolean wantsReasoning(AgentRunRequest request) {
         Object attribute = request == null ? null : request.attributes().get(ATTR_ENABLE_THINKING);

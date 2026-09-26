@@ -7,7 +7,6 @@ import com.djzy.assistant.spi.AgentRuntimePort;
 import com.djzy.assistant.spi.AgentSession;
 import com.djzy.assistant.spi.AgentTurn;
 import com.djzy.assistant.spi.ConfirmDecision;
-import com.djzy.assistant.spi.RuntimeStatePort;
 import com.djzy.assistant.spi.Snapshot;
 import com.djzy.assistant.spi.tool.SideEffect;
 import com.djzy.assistant.spi.tool.ToolCatalog;
@@ -242,7 +241,6 @@ public final class RuntimeTck {
                 .systemPromptPrefix("你是医生数据智能助理。")
                 .tools(catalog)
                 .toolInvoker(invoker)
-                .statePort(new InMemoryStatePort())
                 .deadlineEpochMs(System.currentTimeMillis() + 10_000)
                 .maxIters(10);
         attributes.forEach(builder::attribute);
@@ -264,25 +262,6 @@ public final class RuntimeTck {
         return events;
     }
 
-    /** TCK 用的内存状态端口（生产由平台提供 PG 实现，§19.5）。 */
-    static final class InMemoryStatePort implements RuntimeStatePort {
-        private final Map<String, Snapshot> store = new java.util.concurrent.ConcurrentHashMap<>();
-
-        @Override
-        public Optional<Snapshot> load(String userId, String sessionId, String key) {
-            return Optional.ofNullable(store.get(userId + "/" + sessionId + "/" + key));
-        }
-
-        @Override
-        public void save(String userId, String sessionId, String key, Snapshot snapshot) {
-            store.put(userId + "/" + sessionId + "/" + key, snapshot);
-        }
-
-        @Override
-        public void delete(String userId, String sessionId, String key) {
-            store.remove(userId + "/" + sessionId + "/" + key);
-        }
-    }
 
     static AtomicBoolean unused() {
         return new AtomicBoolean(false);

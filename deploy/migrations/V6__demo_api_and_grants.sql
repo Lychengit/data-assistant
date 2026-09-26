@@ -1,7 +1,10 @@
 -- 骨架期演示数据：接口注册 + 角色授权（§4.7 / §18.4.6 M2/M4 / §19.1）。
 --
--- 目的：让「网关下发范围 → 接口服务拼 WHERE → 不同角色看到不同数据」这条链**开箱可跑**，
--- 同时演示 **多角色取并集**（alice 同时是 boss 与 director → 心内科 ∪ 呼吸科）。
+-- 目的：让「授权 → 接口服务按登录人拼 WHERE → 不同角色看到不同数据」这条链**开箱可跑**。
+--
+-- **历史写法提示**：下面的 column_whitelist 与 role_api.scope（心内科 / 呼吸科）都是当时的字段，
+-- V13 已把这两列删掉——返回哪些列由接口自己的 SQL 写死，范围由接口服务基于登录人推导（§19.1 / ADR-37）。
+-- 这里保留原样是「迁移历史不改」的惯例：已跑过的库不会重跑它，重放时也是写完随即被 V13 删掉。
 -- 与 V3 的 doctor_metric 演示数据配套；接入真实数据前整体替换。
 
 -- ============ 接口注册（M4 管理的对象）============
@@ -36,7 +39,7 @@ SELECT r.id, a.id, v.scope::jsonb
   JOIN sys_api  a ON a.api_code  = v.api_code
 ON CONFLICT (role_id, api_id) DO NOTHING;
 
--- alice：boss + director → 授权范围取并集（心内科 ∪ 呼吸科）
+-- alice：boss + director 两个角色（当年演示的是「范围取并集」；现在并集只影响接口可用性，范围看接口自己）
 INSERT INTO sys_user_role (user_id, role_id)
 SELECT u.id, r.id
   FROM sys_user u JOIN sys_role r ON r.role_code = 'director'

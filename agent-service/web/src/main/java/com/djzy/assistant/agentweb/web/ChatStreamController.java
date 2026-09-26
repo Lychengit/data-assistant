@@ -2,6 +2,7 @@ package com.djzy.assistant.agentweb.web;
 
 import com.djzy.assistant.agentweb.config.AgentServiceProperties;
 import com.djzy.assistant.agentweb.service.ChatService;
+import com.djzy.assistant.common.web.auth.AnonymousAccess;
 import java.util.Optional;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -29,6 +30,7 @@ public class ChatStreamController {
     }
 
     // 明确声明 charset：EventSource 按规范就是 UTF-8，但 curl / 中间代理 / 日志工具需要这一句才不乱码。
+    @AnonymousAccess // 靠一次性券进门，不验 JWT；券本身在 ChatService.attach 里校验
     @GetMapping(path = "/v1/agent/chat/stream", produces = "text/event-stream;charset=UTF-8")
     public SseEmitter stream(
             @RequestParam(value = "ticket", required = false) String ticket,

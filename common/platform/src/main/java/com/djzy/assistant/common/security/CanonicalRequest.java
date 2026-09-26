@@ -19,8 +19,11 @@ import java.util.TreeMap;
  * {SHA-256(请求体) 的 hex 小写}
  * </pre>
  *
- * <p>请求体摘要必须在签名串里：网关下发的 {@code userId + scope + requestId} 就在请求体里，
- * 篡改数据范围会直接导致验签失败——这是本方案的核心价值。
+ * <p>请求体摘要必须在签名串里：网关下发的可信身份与业务入参（{@code caller.userId / requestId} 与
+ * {@code args}）全在请求体里，改一个字节验签就失败——这是本方案的核心价值。
+ *
+ * <p>**注意签名保护的是什么**：是「身份和入参没被改」，**不是**「数据范围没被改」。
+ * 数据范围既不在网关计算、也不下发（§19.1 / ADR-37），所以它压根不在请求体里，也就无所谓被篡改。
  */
 public record CanonicalRequest(
         String method, String path, Map<String, List<String>> queryParams, long timestampSeconds, String nonce, String body) {

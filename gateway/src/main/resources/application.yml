@@ -10,6 +10,12 @@ spring:
     password: ${GATEWAY_DB_PASSWORD:}
     hikari:
       maximum-pool-size: 20
+  data:
+    redis:
+      host: ${GATEWAY_REDIS_HOST:localhost}
+      port: ${GATEWAY_REDIS_PORT:6379}
+      password: ${GATEWAY_REDIS_PASSWORD:}
+      timeout: 2s
 
 # §20.1.5：密钥缺失即拒绝启动。部署时由 docker-compose secret / 环境变量注入。
 gateway:
@@ -22,8 +28,16 @@ gateway:
     agent-service: ${GATEWAY_AGENT_SERVICE_SECRET:}
     management-service: ${GATEWAY_MANAGEMENT_SERVICE_SECRET:}
   service-base-url-template: ${GATEWAY_SERVICE_URL_TEMPLATE:http://{service}:8080}
-  nonce-store: ${GATEWAY_NONCE_STORE:memory}
+  # 防重放 nonce 落点：redis（默认，多副本同一口径）或 memory（单实例退化，§20.1.4 脚注）。
+  nonce-store: ${GATEWAY_NONCE_STORE:redis}
+  # 用户级限速计数落点：redis（默认，多副本同一口径）或 memory（单副本；多副本会放大限额）。
+  rate-limit-store: ${GATEWAY_RATE_LIMIT_STORE:redis}
   per-user-qps: ${GATEWAY_PER_USER_QPS:5}
+  # 熔断（per-user-qps 下面的 G4 保护）：按接口在**本实例内**计数，多副本各自熔断。
+  # 这是刻意的：熔断是保护下游，某一台判定下游在抖就先停它自己的请求，不需要全网一致；
+  # 真要全局一致反而要每次转发多一次 Redis 往返，还得处理「谁来复位计数」，得不偿失。
+  circuit-failure-threshold: ${GATEWAY_CIRCUIT_FAILURE_THRESHOLD:5}
+  circuit-open-duration: ${GATEWAY_CIRCUIT_OPEN_DURATION:30s}
   max-response-bytes: 262144
 
 logging:

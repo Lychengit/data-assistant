@@ -25,11 +25,13 @@ import com.djzy.assistant.management.repo.JdbcRoleApiAdminRepository;
 import com.djzy.assistant.management.repo.RoleApiAdminRepository;
 import com.djzy.assistant.common.llm.ApiKeyCipher;
 import com.djzy.assistant.common.persistence.JdbcLlmProviderStore;
+import com.djzy.assistant.common.storage.s3.ObjectStorageConfig;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
 
 /**
  * 管理后台装配：令牌签发/校验（M1）、授权判定（复用 common 唯一实现）、配置读写（M2）+ 配置审计（§20.7）。
@@ -37,7 +39,9 @@ import org.springframework.context.annotation.Configuration;
  * <p>平台元数据出口**直连 PG**（§18.4.6）：角色、接口、口径不挂在业务对象树上，没有 scope 可算，
  * 因此不经过网关、不套用户范围过滤；但**判定函数仍只有 common 一份**（不重写一套）。
  */
+/** 对象存储装配（object-storage.provider 决定用本机文件系统还是 S3 兼容实现）随本配置一起生效。 */
 @Configuration
+@Import(ObjectStorageConfig.class)
 public class ManagementConfig {
 
     private static final Logger log = LoggerFactory.getLogger(ManagementConfig.class);
@@ -117,7 +121,7 @@ public class ManagementConfig {
         return new JdbcLlmProviderStore(dataSource, apiKeyCipher);
     }
 
-    /** M3 技能包管理（§18.4.6）：版本台账 + 内容寻址的技能包存储（骨架期本地卷，接 MinIO 换实现）。 */
+    /** M3 技能包管理（§18.4.6）：版本台账 + 内容寻址的技能包存储（落在 ObjectStorage 端口上，本机文件系统 / 生产对象存储）。 */
     @Bean
     public com.djzy.assistant.management.repo.SkillPackageRepository skillPackageRepository(
             DataSource dataSource) {
@@ -126,9 +130,8 @@ public class ManagementConfig {
 
     @Bean
     public com.djzy.assistant.management.skill.SkillPackageStore skillPackageStore(
-            ManagementProperties properties) {
-        return new com.djzy.assistant.management.skill.SkillPackageStore.Local(
-                java.nio.file.Path.of(properties.getSkillPackageDir()));
+            com.djzy.assistant.common.storage.ObjectStorage objectStorage) {
+        return new com.djzy.assistant.management.skill.ObjectStorageSkillPackageStore(objectStorage);
     }
 
     /** 审计读的记录写入走**可写**连接（§20.4）。 */

@@ -10,7 +10,8 @@ import java.util.Objects;
  *
  * @param userId 已验明的身份（会话归属校验用）
  * @param sessionId 目标会话
- * @param turnId 目标轮次
+ * @param turnId 目标轮次；**空串 = 不指定轮次**（换券续看时，如果哪台实例都没在跑这一轮，
+ *     就没有轮次可绑。空串而不是 {@code null}，是因为券要序列化进 Redis，少一种「空值」的写法）
  * @param expiresAt 过期时刻
  */
 public record EntryTicket(String userId, String sessionId, String turnId, Instant expiresAt) {
@@ -18,7 +19,8 @@ public record EntryTicket(String userId, String sessionId, String turnId, Instan
     public EntryTicket {
         Objects.requireNonNull(userId, "userId");
         Objects.requireNonNull(sessionId, "sessionId");
-        Objects.requireNonNull(turnId, "turnId");
+        // 不指定轮次是正常情况（见 turnId 的说明），所以这里把 null 归一成空串，不算参数错误
+        turnId = turnId == null ? "" : turnId;
         Objects.requireNonNull(expiresAt, "expiresAt");
     }
 

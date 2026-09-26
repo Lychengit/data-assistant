@@ -37,4 +37,21 @@ public enum SseEventType {
     public String wireName() {
         return wireName;
     }
+
+    /**
+     * 按线名反查事件类型（把历史投影变回事件对象时要用）。
+     *
+     * <p>投影出来的是「线上形状」（事件名 + 载荷），要重新走 SSE 下发就得变回事件对象。
+     * 线名就在本枚举里一一对应，所以这层反查是**自洽的**；查不到说明有人绕过这个契约
+     * 自己造了个事件名，那就直接报错——否则它只会在前端表现成一张「未识别事件」的卡，
+     * 从后端一路静默到界面。
+     */
+    public static SseEventType fromWireName(String wireName) {
+        for (SseEventType type : values()) {
+            if (type.wireName.equals(wireName)) {
+                return type;
+            }
+        }
+        throw new IllegalArgumentException("未知的 SSE 事件名：" + wireName);
+    }
 }

@@ -2,12 +2,12 @@ package com.djzy.assistant.management.service;
 
 import com.djzy.assistant.common.config.ConfigAuditEntry;
 import com.djzy.assistant.common.config.ConfigAuditWriter;
+import com.djzy.assistant.common.skill.PackageContent;
+import com.djzy.assistant.common.skill.PackageReader;
+import com.djzy.assistant.common.skill.SkillManifest;
 import com.djzy.assistant.management.repo.SkillPackageRepository;
 import com.djzy.assistant.management.repo.SkillVersionView;
-import com.djzy.assistant.management.skill.PackageContent;
-import com.djzy.assistant.management.skill.PackageReader;
 import com.djzy.assistant.management.skill.SkillCheckResult;
-import com.djzy.assistant.management.skill.SkillManifest;
 import com.djzy.assistant.management.skill.SkillPackageInspector;
 import com.djzy.assistant.management.skill.SkillPackageStore;
 import com.fasterxml.jackson.databind.ObjectMapper;

@@ -11,8 +11,7 @@ import com.djzy.assistant.spi.AgentRunRequest;
 import com.djzy.assistant.spi.AgentTurn;
 import com.djzy.assistant.spi.AgentSession;
 import com.djzy.assistant.spi.RuntimeMisconfiguredException;
-import com.djzy.assistant.spi.RuntimeStatePort;
-import com.djzy.assistant.spi.Snapshot;
+import io.agentscope.core.message.ContentBlock;
 import com.djzy.assistant.spi.tool.SideEffect;
 import com.djzy.assistant.spi.tool.ToolCatalog;
 import com.djzy.assistant.spi.tool.ToolCategory;
@@ -38,7 +37,7 @@ import org.junit.jupiter.api.io.TempDir;
  *       而且平台没配工具时它们就成了模型唯一能调用的东西。
  *   <li><b>记忆/压缩钩子必须关</b>：默认开启时每轮会**多调一次模型**（实测每轮 2 次调用），
  *       这些调用不在平台成本上报里、也不在事件流里。
- *   <li><b>工作目录必须钉在平台 state-dir 下</b>：默认按 cwd 建 {@code .agentscope/}，
+ *   <li><b>工作目录必须钉在平台 workspace-dir 下</b>：默认按 cwd 建 {@code .agentscope/}，
  *       实测会把会话原文与记忆账本写进应用启动目录（仓库根）。
  *   <li><b>模型侧的 HTTP 失败要翻译成「去哪儿改」</b>：401/403/404 是运维改一个字段就能好的事，
  *       不能和「服务故障」共用一句「请稍后再试」；同时一个字的上游回包都不许带出去。
@@ -58,7 +57,6 @@ class AgentscopeRuntimeBaselineTest {
                 .requestId("r-1")
                 .tools(catalog)
                 .toolInvoker(invocation -> null)
-                .statePort(new NoopStatePort())
                 .deadlineEpochMs(System.currentTimeMillis() + 10_000)
                 .maxIters(5)
                 .build();
@@ -144,30 +142,49 @@ class AgentscopeRuntimeBaselineTest {
         assertInstanceOf(WrappedHttpFailure.class, rateLimited);
     }
 
-    /** 假一个「框架报 HTTP 失败」的现场：消息里带上游回包，用来验证我们不会把它带出去。 */
     /**
      * 平台附的「本轮能力快照」要落在**提问之后**，而且要能被模型看见。
      *
      * <p>为什么值得一条用例：这段文本是给模型的，位置本身就是它的作用——写在系统提示词里不够
      * （开头离提问远，老会话的历史更近），只有拼在用户消息里才"比历史更近"。
      * 拼错了（比如忘了拼、或拼到前面去）不会报错，只会让模型继续照抄历史里的旧能力。
+     *
+     * <p>**它同时也守着历史会话的正确性**：历史是从会话状态投影出来的，投影按
+     * 「第一个文本块 = 用户原话」取值。如果哪天有人图省事把两者拼回一整段字符串，
+     * 这条用例会红——不然用户的气泡里就会莫名其妙多出一段给模型看的快照。
      */
     @Test
     void contextReminderIsAppendedAfterTheUserQuestion() {
-        String text = AgentscopeRuntimeAdapter.withContextReminder(
+        List<ContentBlock> blocks = AgentscopeRuntimeAdapter.contentFor(
                 "你有哪些能力", Map.of(AgentTurn.ATTR_CONTEXT_REMINDER, "(本轮能力快照：本轮可用接口 = iface_doctor_a。)"));
 
-        org.junit.jupiter.api.Assertions.assertTrue(text.startsWith("你有哪些能力"), text);
-        org.junit.jupiter.api.Assertions.assertTrue(text.endsWith("(本轮能力快照：本轮可用接口 = iface_doctor_a。)"), text);
+        org.junit.jupiter.api.Assertions.assertEquals(2, blocks.size(), "提问一块、快照一块");
+        // 第一块是用户原话，**一字不多**（历史投影就靠这条规则取值）
+        org.junit.jupiter.api.Assertions.assertEquals("你有哪些能力", textOf(blocks.get(0)));
+        // 第二块是快照，且以换行开头：拼起来后模型看到的整段文字与改造前逐字一致
+        org.junit.jupiter.api.Assertions.assertEquals("\n(本轮能力快照：本轮可用接口 = iface_doctor_a。)", textOf(blocks.get(1)));
+        org.junit.jupiter.api.Assertions.assertEquals(
+                "你有哪些能力\n\n(本轮能力快照：本轮可用接口 = iface_doctor_a。)",
+                blocks.stream().map(AgentscopeRuntimeBaselineTest::textOf).collect(java.util.stream.Collectors.joining("\n")));
     }
 
     /** 没有快照（例如续跑那一轮没带）时不许凭空多出空行或括号：模型看到的是干净原文。 */
     @Test
     void noReminderMeansTheQuestionIsPassedThroughUnchanged() {
         org.junit.jupiter.api.Assertions.assertEquals(
-                "上个月各科室门诊量", AgentscopeRuntimeAdapter.withContextReminder("上个月各科室门诊量", Map.of()));
+                List.of("上个月各科室门诊量"),
+                texts(AgentscopeRuntimeAdapter.contentFor("上个月各科室门诊量", Map.of())));
         org.junit.jupiter.api.Assertions.assertEquals(
-                "上个月各科室门诊量", AgentscopeRuntimeAdapter.withContextReminder("上个月各科室门诊量", null));
+                List.of("上个月各科室门诊量"),
+                texts(AgentscopeRuntimeAdapter.contentFor("上个月各科室门诊量", null)));
+    }
+
+    private static List<String> texts(List<ContentBlock> blocks) {
+        return blocks.stream().map(AgentscopeRuntimeBaselineTest::textOf).toList();
+    }
+
+    private static String textOf(ContentBlock block) {
+        return ((io.agentscope.core.message.TextBlock) block).getText();
     }
 
     private static final class WrappedHttpFailure extends RuntimeException implements ModelHttpException {
@@ -183,20 +200,5 @@ class AgentscopeRuntimeBaselineTest {
         public Integer getStatusCode() {
             return statusCode;
         }
-    }
-
-    /** TCK 同款内存实现：本测试不落盘。 */
-    private static final class NoopStatePort implements RuntimeStatePort {
-
-        @Override
-        public Optional<Snapshot> load(String userId, String sessionId, String key) {
-            return Optional.empty();
-        }
-
-        @Override
-        public void save(String userId, String sessionId, String key, Snapshot snapshot) {}
-
-        @Override
-        public void delete(String userId, String sessionId, String key) {}
     }
 }

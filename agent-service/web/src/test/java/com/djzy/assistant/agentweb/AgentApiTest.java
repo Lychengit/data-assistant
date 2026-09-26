@@ -36,6 +36,14 @@ import org.springframework.test.web.servlet.MvcResult;
     "agent-service.secrets.login-token=" + AgentWebTestSupport.JWT_SECRET,
     "agent-service.runtime-id=noop",
     "agent-service.turns-per-minute=100",
+    // 单测不依赖外部 Redis：显式退回内存实现（生产默认是 redis，见 application.yml）
+    "agent-service.ticket-store=memory",
+    "agent-service.rate-limit-store=memory",
+    "agent-service.stop-signal-store=memory",
+    // 轮次闸门也显式钉回内存：单测不依赖本机 Redis，多副本口径由 RedisSessionTurnGateTest 验
+    "agent-service.turn-gate-store=memory",
+    // 共享总线也退回内存实现（生产默认 redis）：单测不依赖本机 Redis。
+    "agent-service.live-bus=memory",
     // 落库由测试自己驱动（下面手动 drainOnce），别让定时任务和断言抢
     "agent-service.event-persist-interval-ms=3600000"
 })
@@ -56,7 +64,7 @@ class AgentApiTest {
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("agent-service.event-log-dir", () -> WORK_DIR.resolve("log").toString());
-        registry.add("agent-service.state-dir", () -> WORK_DIR.resolve("state").toString());
+        registry.add("agent-service.workspace-dir", () -> WORK_DIR.resolve("workspace").toString());
         registry.add("agent-service.instance-id", () -> "test");
     }
 
@@ -76,7 +84,7 @@ class AgentApiTest {
     private com.djzy.assistant.agentweb.session.ChatSessionRegistry registry;
 
     @Autowired
-    private com.djzy.assistant.agentweb.session.SessionJournal journal;
+    private com.djzy.assistant.agentweb.session.SessionCatalog catalog;
 
     /** HITL 回执（§19.9）：返回续跑流所需的券。 */
     private String confirm(String sessionId, String confirmId, boolean approved) throws Exception {
@@ -95,6 +103,34 @@ class AgentApiTest {
         mockMvc.perform(post("/v1/agent/sessions")).andExpect(status().isUnauthorized());
     }
 
+    /** 停止（§19.4）：与其它接口同一把锁——没有令牌一律 401。 */
+    @Test
+    void 停止接口也要令牌() throws Exception {
+        mockMvc.perform(post("/v1/agent/sessions/s-1/stop")).andExpect(status().isUnauthorized());
+    }
+
+    /** 别人的 / 不存在的会话一律 404：不泄露存在性（§11.3）。 */
+    @Test
+    void 停止不存在的会话按404处理() throws Exception {
+        mockMvc.perform(post("/v1/agent/sessions/no-such-session/stop")
+                        .header(HttpHeaders.AUTHORIZATION, AgentWebTestSupport.bearer(AgentWebTestSupport.ALICE)))
+                .andExpect(status().isNotFound());
+    }
+    /**
+     * 身份挂在线程上，请求结束就必须清掉（§20.1.6-5）。
+     *
+     * <p>线程是复用的：不清的话，下一个请求可能读到上一个人的 userId。
+     * 这条断言故意用 MockMvc 的同步执行——它跑在测试线程上，正好能看出拦截器有没有收拾干净。
+     */
+    @Test
+    void 请求结束后线程上的用户上下文被清干净() throws Exception {
+        mockMvc.perform(post("/v1/agent/sessions")
+                        .header(HttpHeaders.AUTHORIZATION, AgentWebTestSupport.bearer(AgentWebTestSupport.ALICE)))
+                .andExpect(status().isOk());
+
+        assertThat(com.djzy.assistant.common.web.auth.UserContextHolder.get()).isNull();
+    }
+
     @Test
     void 已停用账号的令牌立即失效() throws Exception {
         mockMvc.perform(post("/v1/agent/sessions")
@@ -109,8 +145,9 @@ class AgentApiTest {
 
         String body = stream(ticket, null);
 
-        assertThat(body).contains("id:0").contains("event:session").contains("event:done");
-        assertThat(body).contains("\"sessionId\":\"" + sessionId + "\"");
+        // 从 0 开始、以 done 收尾；第一条是平台记下的「用户问了什么」
+        assertThat(body).contains("id:0").contains("event:user").contains("event:done");
+        assertThat(body).contains("\"text\":\"你好\"");
         // 令牌绝不能出现在响应里（§19.4）
         assertThat(body).doesNotContain(AgentWebTestSupport.token(AgentWebTestSupport.ALICE));
     }
@@ -125,18 +162,39 @@ class AgentApiTest {
                 .andExpect(status().isUnauthorized());
     }
 
+    /** 断线续传（§19.4）：同一轮内重连只补游标之后那段，不重播已经看过的。 */
     @Test
-    void 带LastEventId重连只推后面的() throws Exception {
+    void 同轮重连只补游标之后的() throws Exception {
+        String sessionId = createSession();
+        String ticket = startTurn(sessionId, "你好");
+        stream(ticket, null);
+
+        // 换一张券（券是一次性的），带上「已经看到 id:1 了」
+        String tail = stream(resumeTicket(sessionId, AgentWebTestSupport.ALICE), "1");
+
+        assertThat(tail).doesNotContain("id:0").doesNotContain("id:1");
+        assertThat(tail).contains("id:2").contains("event:done");
+    }
+
+    /**
+     * **游标只对「同一轮的续看」有意义**：客户端手上往往还留着上一轮的 seq，
+     * 如果服务端拿它去过滤新一轮，新一轮的事件（seq 更小）会被整段静默滤掉——用户看到的是空白。
+     *
+     * <p>所以服务端按轮次过滤：新一轮从头补，一轮之内才认游标。
+     */
+    @Test
+    void 新一轮不会被上一轮的游标吞掉() throws Exception {
         String sessionId = createSession();
         String ticketOne = startTurn(sessionId, "你好");
         String full = stream(ticketOne, null);
         assertThat(full).contains("id:0");
 
         String ticketTwo = startTurn(sessionId, "再问一次");
-        String tail = stream(ticketTwo, "0");
+        String second = stream(ticketTwo, "3");
 
-        assertThat(tail).doesNotContain("event:session");
-        assertThat(tail).contains("id:1");
+        assertThat(second).contains("event:user").contains("\"text\":\"再问一次\"").contains("event:done");
+        // 上一轮的事件不该被重播（回放缓冲里还躺着它们）
+        assertThat(second).doesNotContain("\"text\":\"你好\"");
     }
 
     @Test
@@ -196,13 +254,18 @@ class AgentApiTest {
                 .andExpect(status().isNotFound());
     }
 
-    /** §19.4：历史会话列表——标题就是首条提问，而且只有自己的会话看得见。 */
+    /**
+     * §19.4：会话列表只有自己的会话。
+     *
+     * <p>这里跑的是 noop 运行时（纯契约假实现，**不存会话状态**），所以列表里的标题只能是
+     * 「未命名会话」——它证明的是另一件事：**刚建、还没问过的会话也立刻出现在列表里**
+     * （会话档案在 {@code createSession} 时就落了，不然用户会看到自己刚建的会话凭空消失）。
+     * 「标题取自首条提问」这条链由 {@code AgentWebHistoryTest} 覆盖（它自己往状态库里放了一段对话）。
+     */
     @Test
-    void 会话列表只有自己的_标题取首条提问() throws Exception {
+    void 会话列表只有自己的_新建的也在列表里() throws Exception {
         String aliceSession = createSession();
-        stream(startTurn(aliceSession, "心内科门诊量"), null);
         String bobSession = createSession(AgentWebTestSupport.BOB);
-        stream(startTurn(bobSession, "bob 的私事", AgentWebTestSupport.BOB), null);
 
         MvcResult result = mockMvc.perform(get("/v1/agent/sessions")
                         .header(HttpHeaders.AUTHORIZATION, AgentWebTestSupport.bearer(AgentWebTestSupport.ALICE)))
@@ -216,36 +279,8 @@ class AgentApiTest {
                 .filter(row -> aliceSession.equals(row.get("sessionId")))
                 .findFirst()
                 .orElseThrow();
-        assertThat(mine.get("title")).isEqualTo("心内科门诊量");
-        assertThat(mine.get("questions")).isEqualTo(1);
-    }
-
-    /** §19.4：切回历史会话——服务端回放的是原始事件，前端用同一个归约器渲染。 */
-    @Test
-    void 历史会话按轮次回放() throws Exception {
-        String sessionId = createSession();
-        stream(startTurn(sessionId, "心内科门诊量"), null);
-
-        MvcResult result = mockMvc.perform(get("/v1/agent/sessions/" + sessionId + "/turns")
-                        .header(HttpHeaders.AUTHORIZATION, AgentWebTestSupport.bearer(AgentWebTestSupport.ALICE)))
-                .andExpect(status().isOk())
-                .andReturn();
-        List<Map<String, Object>> turns =
-                com.jayway.jsonpath.JsonPath.read(utf8(result.getResponse()), "$.turns");
-        assertThat(turns).hasSize(1);
-
-        List<Map<String, Object>> events =
-                com.jayway.jsonpath.JsonPath.read(utf8(result.getResponse()), "$.turns[0].events");
-        assertThat(events).extracting(event -> event.get("name")).contains("user", "done");
-
-        Map<String, Object> userEvent = events.stream()
-                .filter(event -> "user".equals(event.get("name")))
-                .findFirst()
-                .orElseThrow();
-        // 提问正文必须能回放出来：否则切回历史会话只剩答案、没有上下文
-        @SuppressWarnings("unchecked")
-        Map<String, Object> userData = (Map<String, Object>) userEvent.get("data");
-        assertThat(userData).containsEntry("text", "心内科门诊量");
+        assertThat(mine.get("title")).isEqualTo("未命名会话");
+        assertThat(mine.get("questions")).isEqualTo(0);
     }
 
     /**
@@ -268,11 +303,13 @@ class AgentApiTest {
 
         // ① 没被删：还在列表里，带归档标记
         assertThat(sessionRow(sessionId)).containsEntry("archived", true);
-        // ② 历史照样回放：归档收起来的是列表位置，不是内容
+        // ② 历史接口照样可达（归档收起来的是列表位置，不是内容）。
+        //    这里跑的是 noop 运行时，它不存会话正文，所以只能断言「不是 404」；
+        //    正文确实还在那条断言由 AgentWebHistoryTest 覆盖（那里状态库里有真实的一段对话）。
         mockMvc.perform(get("/v1/agent/sessions/" + sessionId + "/turns")
                         .header(HttpHeaders.AUTHORIZATION, AgentWebTestSupport.bearer(AgentWebTestSupport.ALICE)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.turns[0].events").isNotEmpty());
+                .andExpect(jsonPath("$.turns").isArray());
 
         // ③ 取消归档就回到「在用」：归档不是单向闸门
         mockMvc.perform(post("/v1/agent/sessions/" + sessionId + "/archive")
@@ -284,9 +321,9 @@ class AgentApiTest {
         assertThat(sessionRow(sessionId)).containsEntry("archived", false);
     }
 
-    /** 归档落在唯一事实源里：重启（新的日志实例）后归档位还在，不是只记在内存。 */
+    /** 归档位落在共享的状态库里：换一台实例 / 重启之后再读列表，归档状态还在，不是只记在内存。 */
     @Test
-    void 归档位写在日志里_重启后仍在() throws Exception {
+    void 归档位落在状态库里_换实例也读得到() throws Exception {
         String sessionId = createSession();
         stream(startTurn(sessionId, "心内科门诊量"), null);
         mockMvc.perform(post("/v1/agent/sessions/" + sessionId + "/archive")
@@ -295,8 +332,8 @@ class AgentApiTest {
                         .content("{\"archived\":true}"))
                 .andExpect(status().isOk());
 
-        // 直接读回放位（与进程重启后重建列表走的是同一条解析路径）
-        assertThat(journal.listSessions(AgentWebTestSupport.ALICE))
+        // 直接读共享状态库（与另一台实例读列表走的是同一条路径）
+        assertThat(catalog.list(AgentWebTestSupport.ALICE))
                 .filteredOn(summary -> sessionId.equals(summary.sessionId()))
                 .extracting(com.djzy.assistant.agentweb.session.SessionSummary::archived)
                 .containsExactly(true);
@@ -360,18 +397,15 @@ class AgentApiTest {
                 .contains("c-test-1")
                 .contains("event:done");
 
+        // 只看 platform_turn 这一段：同槽位里还有框架的会话状态（agent_state），本来就该留着（会话状态不随轮次清空）
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-        assertThat(jdbc.queryForObject(
-                        "SELECT count(*) FROM agent_state WHERE session_id = ?", Integer.class, sessionId))
-                .isEqualTo(1);
+        assertThat(platformTurnRows(jdbc, sessionId)).isEqualTo(1);
 
         String ticket = confirm(sessionId, "c-test-1", true);
         assertThat(stream(ticket, null)).contains("已执行");
 
         // 一轮正常跑完就清掉挂起位：不留着让下一轮误认成待确认
-        assertThat(jdbc.queryForObject(
-                        "SELECT count(*) FROM agent_state WHERE session_id = ?", Integer.class, sessionId))
-                .isZero();
+        assertThat(platformTurnRows(jdbc, sessionId)).isZero();
 
         // 确认是消费型：同一个 confirmId 再确认一次就是 409（§19.9 不可绕过、不可重放）
         mockMvc.perform(post("/v1/agent/sessions/" + sessionId + "/confirm")
@@ -463,6 +497,23 @@ class AgentApiTest {
             return utf8(mockMvc.perform(asyncDispatch(result)).andReturn().getResponse());
         }
         return utf8(result.getResponse());
+    }
+
+    /**
+     * 数一下这个会话的「平台轮次快照」还剩几条（键 {@code platform_turn}）。
+     *
+     * <p>为什么不数整张表：同一个槽位里还存着框架的会话状态（键 {@code agent_state}），
+     * 那是会话的正文、本来就该一直在。这里要验的是「挂起位有没有被清干净」。
+     *
+     * <p>为什么查询条件是「槽位号」而不是会话号：框架的表用 `<userId>:<sessionId>` 做槽位，
+     * 一个用户的多个会话靠前缀区分（见 V16 迁移脚本的说明）。
+     */
+    private static int platformTurnRows(JdbcTemplate jdbc, String sessionId) {
+        Integer rows = jdbc.queryForObject(
+                "SELECT count(*) FROM agentscope_sessions WHERE session_id = ? AND state_key = 'platform_turn'",
+                Integer.class,
+                AgentWebTestSupport.ALICE + ":" + sessionId);
+        return rows == null ? 0 : rows;
     }
 
     /** 正文按 UTF-8 解：SSE 按规范就是 UTF-8，但 MockMvc 默认会按 ISO-8859-1 读，中文会变乱码。 */
