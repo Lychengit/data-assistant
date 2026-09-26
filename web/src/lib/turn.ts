@@ -25,7 +25,8 @@ export interface ClarifyPrompt {
   candidates?: any[];
 }
 
-export type TurnStatus = "running" | "awaiting" | "done" | "error" | "blocked";
+/** `stopped`：用户点了「停止生成」——这一轮被取消，已产出的内容保留（不是出错） */
+export type TurnStatus = "running" | "awaiting" | "done" | "error" | "blocked" | "stopped";
 
 export interface Turn {
   /** 服务端轮次 id；续跑（HITL 确认）会换一个新的，但界面上仍是同一条回答 */
@@ -163,7 +164,19 @@ export function applyEvent(turn: Turn, event: StreamEvent): void {
       };
       return;
     case "done":
-      turn.status = turn.status === "blocked" ? "blocked" : turn.error ? "error" : "done";
+      // 「等确认」与「已停止」都是已经定稿的状态：收尾事件不该把它们翻回 done
+      if (turn.status === "blocked" || turn.status === "stopped") {
+        return;
+      }
+      // 用户点过「停止生成」的那一轮，服务端会在收尾事件上带 stopped=true（见后端 SseProjector）。
+      // 以它为准把这一轮定稿成「已停止」：停止接口的响应和这条事件谁先到都对得上——
+      // 事件先到就在这里定稿；响应先到则上面那句早把它标成 stopped 了。
+      if (data.stopped === true) {
+        turn.status = "stopped";
+        turn.error = null;
+        return;
+      }
+      turn.status = turn.error ? "error" : "done";
       return;
     default:
       pushCard(turn, `未识别事件 ${event.name}`, "", "", event.seq, data);

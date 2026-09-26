@@ -244,14 +244,16 @@ class ChatServiceTest {
         assertThat(stopped).containsEntry("stopped", true);
         assertThat(stoppedAgain).containsEntry("stopped", true);
         assertThat(runtime.cancelReasons()).containsExactly("user_stop");
+        List<StreamRecord> records = recordsOf(service, sessionId);
         // 已经产出的内容（用户的提问）原样保留：停止不是删除
-        assertThat(recordsOf(service, sessionId))
-                .anySatisfy(record -> assertThat(record.event().type()).isEqualTo(SseEventType.USER));
-        // 只该有一条 done
-        assertThat(recordsOf(service, sessionId).stream()
-                        .filter(record -> record.event().type() == SseEventType.DONE)
-                        .count())
-                .isEqualTo(1);
+        assertThat(records).anySatisfy(record -> assertThat(record.event().type()).isEqualTo(SseEventType.USER));
+        // 只该有一条 done，而且它要带上「这一轮是被用户叫停的」这个标记（见 SseProjector）：
+        // 前端就靠这一格把气泡定稿成「已停止生成」，不用去猜停止接口的响应和事件谁先到。
+        List<StreamRecord> doneRecords = records.stream()
+                .filter(record -> record.event().type() == SseEventType.DONE)
+                .toList();
+        assertThat(doneRecords).hasSize(1);
+        assertThat(doneRecords.get(0).event().payload()).containsEntry("stopped", true);
     }
 
     /**

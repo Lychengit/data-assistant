@@ -39,6 +39,18 @@ const archiving = ref<string | null>(null);
 /** 「已归档」分区是否展开：默认收起，主列表只放还在用的会话 */
 const showArchived = ref(false);
 
+/**
+ * 正在生成的那一轮（没有就是 null）：发送键就在这时变成停止键。
+ *
+ * 从 turns 里算、而不是读下面那个 active 变量——active 是普通变量，被换掉时模板不会重算，
+ * 按钮就会「点不动」或者「停不下来」。
+ */
+const runningTurn = computed(() => turns.value.find((turn) => turn.status === "running") ?? null);
+/** 停止请求在途：期间禁掉按钮，免得连点两下发两次 */
+const stopping = ref(false);
+/** 停下之后状态行上的那句话：接口响应和收流事件两处都会用到，抽出来免得同一件事两种说法 */
+const STOPPED_HINT = "已停止这一轮，可以接着问下一轮";
+
 let stream: ChatStream | null = null;
 /** 首发用发起轮返回的券；重连时置空，改走换券接口 */
 let pendingTicket: string | null = null;
@@ -205,7 +217,9 @@ async function openSession(id: string): Promise<void> {
 
 async function send(): Promise<void> {
   const text = question.value.trim();
-  if (!text || busy.value || !(await ensureFreshToken())) {
+  // 生成中不发新一轮：服务端的轮次闸门本来也会拒（「上一轮还在处理中」），
+  // 但让界面自己先说清楚更好——这段时间发送键已经变成停止键了。
+  if (!text || busy.value || runningTurn.value || !(await ensureFreshToken())) {
     return;
   }
   busy.value = true;
@@ -282,6 +296,11 @@ function attach(): void {
         // 收流后主动关：不自闭的话服务端会一直挂着这条连接
         self.close();
         streamStatus.value = "closed";
+        if (active?.status === "stopped") {
+          // close() 会顺带把状态行文案清掉，这里把「已停止」那句补回来：
+          // stopGenerating 里也设过同一句，谁先谁后都显示得出来
+          streamDetail.value = STOPPED_HINT;
+        }
       }
       persist();
       void scrollToEnd();
@@ -331,6 +350,38 @@ function stopReceiving(): void {
   // 只停「接收」：答案仍在服务端继续生成，随时可以重连回来看（§19.4）
   stream?.close();
   streamStatus.value = "closed";
+}
+
+/**
+ * 停止生成（§19.4 / H-09）：让**服务端真的取消**这一轮。
+ *
+ * 和上面 stopReceiving（只断这条 SSE、模型照跑）是两件事。这个按钮的语义是「别跑了」：
+ * 只停这一轮（会话还在、已产出的内容保留），停了之后可以立刻接着问下一轮。
+ *
+ * 「已停止」这个结论有两条来源，它们说的是同一件事，不会打架：
+ * ①正常情况：服务端收尾时发的 done 带 stopped=true，由 lib/turn.ts 把这一轮定稿成「已停止」；
+ * ②这里兜底：流已经断了（点过「停止接收」、或连接失败）收不到那条 done 时，用接口返回的标记它。
+ * 兜底这一条要求「界面这边也还认为它在跑」才动手，否则界面会从已经收好的答案翻回「已停止」，那是骗人的。
+ * 幂等由服务端保证；连点两下由 stopping 期间禁用按钮挡住。
+ */
+async function stopGenerating(): Promise<void> {
+  const turn = runningTurn.value;
+  if (!turn || !sessionId.value || stopping.value) {
+    return;
+  }
+  stopping.value = true;
+  try {
+    const result = await agent.stopTurn(sessionId.value);
+    if (result.stopped && turn.status === "running") {
+      turn.status = "stopped";
+    }
+    streamDetail.value = result.stopped ? STOPPED_HINT : "这一轮已经跑完了，没有可停的";
+    persist();
+  } catch (error) {
+    reportError(error);
+  } finally {
+    stopping.value = false;
+  }
 }
 
 /**
@@ -525,7 +576,19 @@ onBeforeUnmount(() => {
           placeholder="例如：上个月心内科各医生的门诊量排名（Enter 发送，Shift+Enter 换行）"
           @keydown.enter="onComposerEnter"
         ></textarea>
-        <button class="primary" type="submit" :disabled="busy || !question.trim()">
+        <!-- 生成中就把「发送」换成停止键（Codex 的做法）：它停的是服务端这一轮，不是「不看了」 -->
+        <button
+          v-if="runningTurn"
+          type="button"
+          class="danger stop"
+          :disabled="stopping"
+          title="停止生成：取消这一轮（已产出的内容保留），停完可以马上接着问"
+          aria-label="停止生成"
+          @click="stopGenerating"
+        >
+          <svg class="stop-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" /></svg>
+        </button>
+        <button v-else class="primary" type="submit" :disabled="busy || !question.trim()">
           {{ busy ? "发送中…" : "发送" }}
         </button>
       </form>
@@ -641,6 +704,22 @@ onBeforeUnmount(() => {
 .composer button {
   height: 40px;
   min-width: 88px;
+}
+
+/* 停止键：方形图标按钮，和发送键同一个位置、同一个高度（生成时它顶掉发送键） */
+.composer button.stop {
+  min-width: 44px;
+  width: 44px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.composer button.stop .stop-icon {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
 }
 
 .side-row {

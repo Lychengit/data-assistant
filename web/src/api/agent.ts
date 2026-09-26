@@ -37,6 +37,29 @@ export function resumeTicket(sessionId: string): Promise<TicketBody> {
   });
 }
 
+/**
+ * 停止这一轮的结果（§19.4）。
+ *
+ * `stopped=false` 不是失败：它表示「没找到在跑的那一轮」——会话还没跑过，或者早就跑完了。
+ * 接口本身是**幂等**的，重复点、跑完再点都只会回一个结果。
+ */
+export interface StopResult {
+  sessionId: string;
+  turnId: string;
+  stopped: boolean;
+}
+
+/**
+ * 停止生成这一轮（§19.4 / H-09）：服务端**真的取消**这一轮，不是「前端不看了」。
+ *
+ * 三条语义：只停这一轮（会话还在、已产出的内容保留，用户可以马上问下一轮）、幂等、跨实例也停得掉
+ * （先写共享信号键，再往框架总线上推一条，持有那一轮的实例收到就当场取消）。
+ * 和「断开接收」的区别见 ChatView 里 stopGenerating 的说明。
+ */
+export function stopTurn(sessionId: string): Promise<StopResult> {
+  return request<StopResult>(`/v1/agent/sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST" });
+}
+
 /** HITL 确认（§19.9）：确认后服务端续跑，并给一张新券让我们接着看。 */
 export function confirm(sessionId: string, confirmId: string, approved: boolean): Promise<TicketBody> {
   return request<TicketBody>(`/v1/agent/sessions/${encodeURIComponent(sessionId)}/confirm`, {

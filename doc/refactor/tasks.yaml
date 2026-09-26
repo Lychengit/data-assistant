@@ -490,6 +490,15 @@ backlog:
     deferred_because: "用户 2026-09-26 先把它定为 H-02 的替代（逐字回放不做，但要补计时 + 用量），随后明确「先不做」——所以是暂缓、不是裁定不做。场景一直成立：框架每轮都把 ModelCallEndEvent 的用量与耗时递到我们手上，我们现在整个丢掉，只是不急着补"
     resume_when: "用户说做再做（它是 H-02 的替代：不要逐字内容，只要性能与成本数字）"
     default_approach: "框架的 ModelCallEndEvent 带 ChatUsage（input / output / cached / reasoning token 数，还带 time 耗时），而平台现在没有任何一处映射 MODEL_CALL（全库检索为空）。做法：翻译器加一条映射 → 平台事件（例如 MODEL_CALL_END，带 usage 与耗时）→ 走现有管线落事实表（一轮几行）；「首字延迟」用该轮第一条 TEXT_DELTA 与该轮开始时刻的时差算，不必新存逐字内容。不动会话正文，也不动历史回放"
+  - id: "H-16"
+    title: "「停止生成」前端接线 —— 已完成（2026-09-26）：发送键在生成时变成停止键，收尾事件带 stopped 标记"
+    status: "已完成"
+    deferred_because: "H-09 只做了服务端停止（接口 + 跨实例推送），前端原先只有「停止接收」（只断开这条 SSE、模型照跑）；用户 2026-09-26 明确要的是前者，并按 Codex 的样子把按钮放在发送键的位置"
+    resume_when: "已于 2026-09-26 完成，无需恢复"
+    default_approach: "停止在事件流里的**唯一出口**是 SseProjector 的 REQUEST_STOP → done，这条收尾事件带 stopped=true；前端归约器（lib/turn.ts）据此把这一轮定稿成「已停止」。为什么不让前端自己判：停止接口的响应和这条事件谁先到是不确定的，两边都能推出同一个结论才叫稳。接口响应只兜一种底——流已经断了（用户点过「停止接收」/连接失败）收不到那条事件时，用返回的 stopped 标记它，且必须「界面这边也还认为它在跑」才动手，否则会把已经收好的答案翻成「已停止」"
+    evidence: "后端：ChatServiceTest 停止那条用例加断言「done 的 payload 带 stopped=true」（该类 16 例仍全绿）；前端：vue-tsc + vite build 通过（前端没有单测框架，不为这一处新引入一套）。全量 mvn -B install 17 模块 BUILD SUCCESS、449 例 0 失败（5 例跳过：3 例真容器、2 例真 PG，与改造前同一批）"
+    real_process_evidence: "真进程 + 真模型（DeepSeek）浏览器实测：发送后约 2 秒停止键出现、发送键让位；点停止后服务端当场取消（事件日志 89 条 TEXT_DELTA 之后一条 REQUEST_STOP，不再产出内容），气泡显示「已停止生成：这一轮被取消，上面已经产出的内容保留。」，发送键立刻回来（说明轮次坑位已放开，停完能马上接着问）"
+
 limitations:
   - id: "L-01"
     limitation: "实例被硬杀（OOM 或 SIGKILL）时本轮不进 AgentState（框架只在 call() 结束落盘，只有优雅停机才补存）"
@@ -562,3 +571,6 @@ limitations:
   - id: "L-23"
     limitation: "事件日志的三条自愈动作都只作用在「已确认投递」的那部分上：消费端长期不通（队列 / Redis 挂了）时，未确认的记录会一直堆在活动文件里——它不裁剪、也不滚动（见 DR-52 最后一条），所以这段时间磁盘占用会一直涨，保留窗口管不住它"
     mitigation: "这是刻意的取舍：宁可占磁盘也不丢事件（ADR-28）。消费端恢复后第一次维护就会把积压送走、文件随即收拢；真遇到长时间不通，该处理的是消费端本身（日志文件只是它的上游，不是原因）"
+  - id: "L-24"
+    limitation: "停止过的轮次在**历史回放**里看不到「已停止生成」这个标记：历史是从框架的 AgentState 现算出来的（§19.4 / SessionTranscript），而框架状态里记的是「模型看到了什么」。中断时框架自己会往状态里追加一句 assistant 消息 I noticed that you have interrupted me. What can I do for you?（ReActAgent#handleInterrupt，2026-09-26 核 2.0.3 源码），所以那一轮重新打开时，看到的是「答案 + 一句英文套话」，而不是界面上那个标记"
+    mitigation: "实时那一眼有明确交代（气泡上「已停止生成」）；历史里那句英文是框架的中断收尾语，不是我们漏渲染。刻意不补第二份真相（用户口径：会话记录就用框架自己的能力）。真要补成中文标记，得让历史那条链去读平台审计事实表里的 REQUEST_STOP，属于「两套真相对齐」的活，先如实记在这里"

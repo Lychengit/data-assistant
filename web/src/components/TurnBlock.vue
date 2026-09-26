@@ -104,6 +104,9 @@ const answerText = computed<string>(() => {
         <img :src="figure.url" :alt="figure.name" />
       </div>
 
+      <!-- 停止要如实说：这一轮是被用户取消的，不是跑完的，也不是出错 -->
+      <div v-if="turn.status === 'stopped'" class="muted hint">已停止生成：这一轮被取消，上面已经产出的内容保留。</div>
+
       <div v-if="turn.error" class="banner error">
         {{ turn.error.message }}<span v-if="turn.error.code" class="mono">（{{ turn.error.code }}）</span>
       </div>

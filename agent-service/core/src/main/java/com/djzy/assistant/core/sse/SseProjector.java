@@ -77,7 +77,14 @@ public final class SseProjector {
                     SseEventType.PERMISSION, Map.of("allowed", false, "denied", true)));
             case EXCEED_MAX_ITERS -> Optional.of(SseEvent.of(
                     SseEventType.ERROR, Map.of("code", "MAX_ITERS_EXCEEDED", "message", "已达到最大推理步数")));
-            case REQUEST_STOP, TURN_END -> Optional.of(SseEvent.of(SseEventType.DONE, Map.of("turnId", event.turnId())));
+            // 用户叫停（REQUEST_STOP）：这一条是「停止」在事件流里的**唯一出口**，
+            // 收尾事件带上 stopped=true，前端据此把这一轮定稿成「已停止生成」。
+            // 为什么不让前端自己猜：停止接口的响应和这条事件谁先到是不确定的，
+            // 由服务端在事件里说清楚，两种先后顺序下界面的结论都一样。
+            case REQUEST_STOP -> Optional.of(SseEvent.of(
+                    SseEventType.DONE, Map.of("turnId", event.turnId(), "stopped", Boolean.TRUE)));
+            // 一轮正常跑完、或者挂起等确认：普通收尾，不额外标东西。
+            case TURN_END -> Optional.of(SseEvent.of(SseEventType.DONE, Map.of("turnId", event.turnId())));
             case ERROR -> Optional.of(SseEvent.of(
                     SseEventType.ERROR,
                     Map.of(
