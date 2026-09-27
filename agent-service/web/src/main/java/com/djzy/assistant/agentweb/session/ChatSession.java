@@ -39,6 +39,14 @@ public final class ChatSession {
 
     private volatile boolean running;
     private volatile boolean suspended;
+    /**
+     * 这一轮**弹过确认卡**（框架在执行前拦下了写调用）。
+     *
+     * <p>为什么不能只看 {@code suspended}：框架拦下写调用之后发的是 {@code REQUEST_STOP} 而不是
+     * {@code AGENT_END}，所以「等确认」这件事得由平台自己记着——只认终点事件的话，会话根本没被
+     * 标成挂起，用户点「确认」拿到的是 409（2026-09-27 实测）。
+     */
+    private volatile boolean confirmRaised;
     private volatile String currentTurnId;
     private volatile AgentSession runtimeSession;
     /** 这一轮在本实例上占的坑位句柄（T1-07）：收尾时用它放坑；没抢到坑位时为 null。 */
@@ -88,6 +96,7 @@ public final class ChatSession {
         this.runtimeSession = runtimeSession;
         this.running = true;
         this.suspended = false;
+        this.confirmRaised = false;
         remember(turnId);
         touch();
     }
@@ -111,6 +120,17 @@ public final class ChatSession {
         running = false;
         touch();
         return true;
+    }
+
+    /** 这一轮弹过确认卡（{@code AWAITING_CONFIRM} 已经推给前端）。 */
+    public void markConfirmRaised() {
+        this.confirmRaised = true;
+        touch();
+    }
+
+    /** 这一轮是否弹过确认卡；下一轮 {@link #beginTurn} 会把它清掉。 */
+    public boolean confirmRaised() {
+        return confirmRaised;
     }
 
     public synchronized void markSuspended() {

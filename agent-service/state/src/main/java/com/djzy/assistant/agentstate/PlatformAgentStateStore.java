@@ -34,6 +34,16 @@ import javax.sql.DataSource;
  * 这个拼法是框架内部的约定、没有对外暴露，所以我们在这儿照抄一份——
  * {@code PlatformAgentStateStoreTest} 专门有一条用例钉住它：拼错了那条用例会红，
  * 而不是等到线上「删除静默失效」才发现。
+ *
+ * <p><b>第二个洞：沙箱状态根本存不下来</b>（2026-09-27 真机定位）。框架给沙箱状态用的槽位号是
+ * <b>路径式</b>的（{@code IsolationScope.USER} → {@code sandbox/user/<agentId>/<userId>}，见框架
+ * {@code SessionSandboxStateStore#slotSessionId}），而框架的 JDBC 实现
+ * （{@code JdbcAgentStateStore#validateSlotId}）明确拒绝含 {@code /} 或 {@code \} 的槽位号 ——
+ * 于是沙箱状态的 save / load / delete <b>每一次都抛 IllegalArgumentException</b>。表现是：容器那点状态
+ * （「这台容器还在、工作区已经就绪」）永远写不进去，下一轮只能起一台全新的空容器 —— 上一轮在容器里
+ * 生成的文件随之消失，技能里「先生成文件、确认后再上传」这种跨轮流程会直接断掉。修法是在交给框架之前
+ * 把 {@code %} / {@code /} / {@code \} 转义掉，读回来时再还原；不含这几个字符的会话号（平台的会话 UUID
+ * 就是）逐字不变，所以对既有状态是零影响。
  */
 public final class PlatformAgentStateStore implements AgentStateStore {
 
@@ -85,7 +95,61 @@ public final class PlatformAgentStateStore implements AgentStateStore {
     }
 
     private static String slotId(String userId, String sessionId) {
-        return (userId == null || userId.isBlank() ? ANON_USER : userId) + ':' + sessionId;
+        return escape(userId == null || userId.isBlank() ? ANON_USER : userId) + ':' + escape(sessionId);
+    }
+
+    /**
+     * 把框架不接受的两个字符转义掉（见类注释里的「第二个洞」）。
+     *
+     * <p>{@code %} 必须一起转义，否则「原本就长 {@code %2F} 的会话号」会被解回成 {@code /}，
+     * 两个不同的槽位撞到一起。
+     */
+    private static String escape(String id) {
+        if (id == null) {
+            return null;
+        }
+        StringBuilder out = new StringBuilder(id.length() + 8);
+        for (int i = 0; i < id.length(); i++) {
+            char c = id.charAt(i);
+            switch (c) {
+                case '%' -> out.append("%25");
+                case '/' -> out.append("%2F");
+                case '\\' -> out.append("%5C");
+                default -> out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    /**
+     * {@link #escape} 的逆运算。
+     *
+     * <p>刻意写成一次扫描，而不是「连着 replace 三次」：后者在 {@code %252F} 这种输入上会还原错
+     * （先看到的 {@code %2F} 不是转义出来的那一个）。
+     */
+    private static String unescape(String id) {
+        if (id == null) {
+            return null;
+        }
+        StringBuilder out = new StringBuilder(id.length());
+        for (int i = 0; i < id.length(); i++) {
+            char c = id.charAt(i);
+            if (c == '%' && i + 2 < id.length()) {
+                String decoded = switch (id.substring(i + 1, i + 3)) {
+                    case "25" -> "%";
+                    case "2F" -> "/";
+                    case "5C" -> "\\";
+                    default -> null;
+                };
+                if (decoded != null) {
+                    out.append(decoded);
+                    i += 2;
+                    continue;
+                }
+            }
+            out.append(c);
+        }
+        return out.toString();
     }
 
     private static void bind(PreparedStatement stmt, List<Object> params) throws SQLException {
@@ -95,6 +159,8 @@ public final class PlatformAgentStateStore implements AgentStateStore {
     }
 
     // ==================== 以下一律委托给框架实现 ====================
+    // 注意：槽位号是「每个方法自己拼的」（框架的 JdbcAgentStateStore 内部拼 <userId>:<sessionId>），
+    // 所以每个入口都得先把两个身份转义一遍，漏一个就会在那个入口上重新炸出「会话号不能含路径分隔符」。
 
     @Override
     public boolean supportsVersioning() {
@@ -104,49 +170,58 @@ public final class PlatformAgentStateStore implements AgentStateStore {
     @Override
     public <T extends State> VersionedState<T> getVersioned(
             String userId, String sessionId, String key, Class<T> type) {
-        return delegate.getVersioned(userId, sessionId, key, type);
+        return delegate.getVersioned(escape(userId), escape(sessionId), key, type);
     }
 
     @Override
     public long saveIfVersion(
             String userId, String sessionId, String key, State value, long expectedVersion) {
-        return delegate.saveIfVersion(userId, sessionId, key, value, expectedVersion);
+        return delegate.saveIfVersion(escape(userId), escape(sessionId), key, value, expectedVersion);
     }
 
     @Override
     public void save(String userId, String sessionId, String key, State value) {
-        delegate.save(userId, sessionId, key, value);
+        delegate.save(escape(userId), escape(sessionId), key, value);
     }
 
     @Override
     public void save(String userId, String sessionId, String key, List<? extends State> values) {
-        delegate.save(userId, sessionId, key, values);
+        delegate.save(escape(userId), escape(sessionId), key, values);
     }
 
     @Override
     public <T extends State> Optional<T> get(String userId, String sessionId, String key, Class<T> type) {
-        return delegate.get(userId, sessionId, key, type);
+        return delegate.get(escape(userId), escape(sessionId), key, type);
     }
 
     @Override
     public <T extends State> List<T> getList(
             String userId, String sessionId, String key, Class<T> type) {
-        return delegate.getList(userId, sessionId, key, type);
+        return delegate.getList(escape(userId), escape(sessionId), key, type);
     }
 
     @Override
     public boolean exists(String userId, String sessionId) {
-        return delegate.exists(userId, sessionId);
+        return delegate.exists(escape(userId), escape(sessionId));
     }
 
     @Override
     public void delete(String userId, String sessionId) {
-        delegate.delete(userId, sessionId);
+        delegate.delete(escape(userId), escape(sessionId));
     }
 
+    /** 回给调用方的必须是**没转义过的**会话号：转义是我们和框架之间的私事。 */
     @Override
     public Set<String> listSessionIds(String userId) {
-        return delegate.listSessionIds(userId);
+        Set<String> raw = delegate.listSessionIds(escape(userId));
+        if (raw == null || raw.isEmpty()) {
+            return raw;
+        }
+        Set<String> out = new java.util.LinkedHashSet<>(raw.size());
+        for (String id : raw) {
+            out.add(unescape(id));
+        }
+        return out;
     }
 
     @Override

@@ -41,9 +41,15 @@ public final class SkillPackageInspector {
             "PERSISTENCE", Pattern.compile("(crontab|systemd|\\.bashrc|run\\.py\\s*&)", Pattern.CASE_INSENSITIVE),
             "OBFUSCATED", Pattern.compile("(eval\\(|exec\\(|base64\\s+-d|marshal\\.loads|\\\\x[0-9a-f]{2}\\\\x[0-9a-f]{2})", Pattern.CASE_INSENSITIVE));
 
-    /** manifest 必填项（§18.5.2：id / 名称 / 版本 / 类型 / 描述 / 参数定义 / 绑定接口 / 脚本 / 资源 / 状态）。 */
-    public static final List<String> REQUIRED_FIELDS =
-            List.of("id", "name", "version", "kind", "description", "params", "boundRoutes", "script", "resources", "status");
+    /**
+     * manifest 必填项（§18.5.2）：只有 {@code id / name / description}，再加按类型适用的 {@code script}。
+     *
+     * <p>原来这里是十项（版本 / 类型 / 参数定义 / 绑定接口 / 资源 / 状态都必填）。2026-09-27 起只留四项：
+     * 上传的人往往不是写代码的人，十项必填意味着十次「少写一个就被驳回」，而其余六项各有出路——
+     * 版本可自动生成、类型可从 {@code script} 块推出来、绑定接口上传后在技能包页「绑定接口」里配、
+     * 参数与资源只影响 SKILL.md 的展示、状态根本没人读。必填项多一项，就多一分「对着报错改 JSON」。
+     */
+    public static final List<String> REQUIRED_FIELDS = List.of("id", "name", "description", "script");
 
     private SkillPackageInspector() {}
 
@@ -59,12 +65,21 @@ public final class SkillPackageInspector {
         results.add(versionFormat(manifest));
         results.add(kindKnown(manifest));
         results.add(boundRoutesRegistered(manifest, apis));
-        results.add(writeRoutesNotBound(manifest, apis));
         results.add(scriptPolicy(manifest));
         results.add(scriptPresent(content));
         results.add(exportsDeclared(manifest, apis));
         results.addAll(egressHints(content));
         return List.copyOf(results);
+    }
+
+    /**
+     * 通过时只说「结论」，不通过时才说「为什么不通过」。
+     *
+     * <p>为什么非要这样：detail 是给评审人**逐行读**的，一行通过项还挂着「版本号格式不合法」这种
+     * 失败措辞，整页读下来就像一串报错——评审人要么被误导，要么干脆不看了。
+     */
+    private static String detail(boolean ok, String okText, String failText) {
+        return ok ? okText : failText;
     }
 
     private static SkillCheckResult manifestCompleteness(SkillManifest manifest) {
@@ -84,27 +99,47 @@ public final class SkillPackageInspector {
                 missing.add(field);
             }
         }
-        return SkillCheckResult.blocking("MANIFEST_REQUIRED_FIELDS", missing.isEmpty(), "缺失项：" + missing);
+        return SkillCheckResult.blocking(
+                "MANIFEST_REQUIRED_FIELDS",
+                missing.isEmpty(),
+                detail(missing.isEmpty(), "必填项齐全", "缺失项：" + missing));
     }
 
     private static SkillCheckResult skillCodeFormat(SkillManifest manifest) {
         boolean ok = manifest.skillCode() != null && SKILL_CODE.matcher(manifest.skillCode()).matches();
         return SkillCheckResult.blocking(
-                "SKILL_CODE_FORMAT", ok, "技能 id 必须是 [a-z][a-z0-9_]{2,63}，当前：" + manifest.skillCode());
+                "SKILL_CODE_FORMAT",
+                ok,
+                detail(ok, "技能 id 合法：" + manifest.skillCode(),
+                        "技能 id 必须是 [a-z][a-z0-9_]{2,63}，当前：" + manifest.skillCode()));
     }
 
     private static SkillCheckResult versionFormat(SkillManifest manifest) {
-        boolean ok = manifest.version() != null && VERSION.matcher(manifest.version()).matches();
-        return SkillCheckResult.blocking("VERSION_FORMAT", ok, "版本号格式不合法：" + manifest.version());
+        // 不写版本不算错：发布时按包内容哈希自动生成（内容没变就是同一个包，自动版本也不会撞）。
+        if (manifest.version() == null) {
+            return SkillCheckResult.blocking("VERSION_FORMAT", true, "未声明版本，发布时按内容自动生成");
+        }
+        boolean ok = VERSION.matcher(manifest.version()).matches();
+        return SkillCheckResult.blocking("VERSION_FORMAT", ok, detail(
+                ok, "版本号合法：" + manifest.version(), "版本号格式不合法：" + manifest.version()));
     }
 
     private static SkillCheckResult kindKnown(SkillManifest manifest) {
         String kind = manifest.kind();
         boolean ok = "script".equalsIgnoreCase(kind) || "agentic".equalsIgnoreCase(kind);
-        return SkillCheckResult.blocking("KIND_KNOWN", ok, "类型只能是 script 或 agentic，当前：" + kind);
+        return SkillCheckResult.blocking("KIND_KNOWN", ok, detail(
+                ok,
+                "类型合法：" + kind,
+                "类型只能写 script 或 agentic（也可以不写，按包内有没有 script 块自动判），当前：" + kind));
     }
 
     private static SkillCheckResult boundRoutesRegistered(SkillManifest manifest, Map<String, ApiMetadata> apis) {
+        // 不写绑定接口不是缺项：绑定有第二个入口（技能包页「绑定接口」），上传只负责把包收下。
+        // 写了才校验——写错接口名要当场拦住，否则就成了「绑了三个接口，其实一个都没生效」。
+        if (manifest.boundRoutes().isEmpty()) {
+            return SkillCheckResult.blocking(
+                    "BOUND_APIS_REGISTERED", true, "未声明绑定接口（上传后在技能包页「绑定接口」里配）");
+        }
         Set<String> malformed = new LinkedHashSet<>();
         Set<String> unknown = new LinkedHashSet<>();
         Set<String> disabled = new LinkedHashSet<>();
@@ -121,28 +156,12 @@ public final class SkillPackageInspector {
             }
         }
         boolean ok = malformed.isEmpty() && unknown.isEmpty() && disabled.isEmpty();
-        return SkillCheckResult.blocking(
-                "BOUND_APIS_REGISTERED",
+        return SkillCheckResult.blocking("BOUND_APIS_REGISTERED", ok, detail(
                 ok,
-                "写法不合法（应为「服务名 方法 路径」）：" + malformed + "；未注册：" + unknown + "；已停用：" + disabled);
+                "已绑定 " + manifest.boundRoutes().size() + " 个接口，全部已注册且启用",
+                "写法不合法（应为「服务名 方法 路径」）：" + malformed + "；未注册：" + unknown + "；已停用：" + disabled));
     }
 
-    /** ADR-19 ②：write 类接口**默认不对技能开放**。要开放必须走例外流程（当前骨架期直接拦）。 */
-    private static SkillCheckResult writeRoutesNotBound(SkillManifest manifest, Map<String, ApiMetadata> apis) {
-        Set<String> writes = new LinkedHashSet<>();
-        for (String declared : manifest.boundRoutes()) {
-            ApiRoute route = parse(declared, null);
-            if (route == null) {
-                continue;
-            }
-            ApiMetadata api = apis.get(route.format());
-            if (api != null && api.isWrite()) {
-                writes.add(route.format());
-            }
-        }
-        return SkillCheckResult.blocking(
-                "WRITE_API_NOT_ALLOWED", writes.isEmpty(), "技能不得绑定写接口（ADR-19）：" + writes);
-    }
 
     private static SkillCheckResult scriptPolicy(SkillManifest manifest) {
         if (!manifest.isScript()) {
@@ -156,11 +175,12 @@ public final class SkillPackageInspector {
         boolean policyOk = SkillManifest.ScriptSpec.DATA_NONE.equals(policy)
                 || SkillManifest.ScriptSpec.DATA_VIA_HOST.equals(policy);
         boolean timeoutOk = script.timeoutSeconds() > 0 && script.timeoutSeconds() <= 300;
-        return SkillCheckResult.blocking(
-                "SCRIPT_DATA_POLICY",
-                policyOk && timeoutOk,
+        boolean ok = policyOk && timeoutOk;
+        return SkillCheckResult.blocking("SCRIPT_DATA_POLICY", ok, detail(
+                ok,
+                "script.data=" + policy + "、timeoutSeconds=" + script.timeoutSeconds() + "，均在允许范围",
                 "script.data 必须是 none / via_host（当前：" + policy + "），timeoutSeconds 必须在 (0,300]（当前："
-                        + script.timeoutSeconds() + "）");
+                        + script.timeoutSeconds() + "）"));
     }
 
     private static SkillCheckResult scriptPresent(PackageContent content) {
@@ -170,11 +190,17 @@ public final class SkillPackageInspector {
         }
         String path = manifest.script() == null ? null : manifest.script().path();
         boolean present = content.has(path) && SCRIPT_EXT.matcher(path).matches();
-        return SkillCheckResult.blocking("SCRIPT_PRESENT", present, "包内缺少声明的脚本文件：" + path);
+        return SkillCheckResult.blocking("SCRIPT_PRESENT", present, detail(
+                present, "脚本在包内：" + path, "包内缺少声明的脚本文件：" + path));
     }
 
     /** 「导出字段清单评审」的前置自动检查：导出列必须落在绑定接口的**返回字段契约**并集内（§18.4.6 M3）。 */
     private static SkillCheckResult exportsDeclared(SkillManifest manifest, Map<String, ApiMetadata> apis) {
+        // 没绑接口就没有「返回字段契约」可作上界，这项检查不适用（绑定后按页面那份重新判定）。
+        if (manifest.boundRoutes().isEmpty()) {
+            return SkillCheckResult.blocking(
+                    "EXPORT_COLUMNS_WHITELISTED", true, "未绑定接口，暂不校验导出列（上界来自绑定接口的返回字段契约）");
+        }
         Set<String> allowed = new LinkedHashSet<>();
         for (String declared : manifest.boundRoutes()) {
             ApiRoute route = parse(declared, null);
@@ -193,7 +219,11 @@ public final class SkillPackageInspector {
             }
         }
         return SkillCheckResult.blocking(
-                "EXPORT_COLUMNS_WHITELISTED", outside.isEmpty(), "导出列不在绑定接口的返回字段契约内：" + outside);
+                "EXPORT_COLUMNS_WHITELISTED",
+                outside.isEmpty(),
+                detail(outside.isEmpty(),
+                        "导出列都在绑定接口的返回字段契约内：" + manifest.exports(),
+                        "导出列不在绑定接口的返回字段契约内：" + outside));
     }
 
     /**
@@ -227,11 +257,12 @@ public final class SkillPackageInspector {
         return results;
     }
 
-    /** 绑定接口的元数据视图（只取检查用得到的字段）。 */
-    public record ApiMetadata(String route, String kind, boolean enabled, List<String> resultColumns) {
-
-        public boolean isWrite() {
-            return "write".equalsIgnoreCase(kind);
-        }
-    }
+    /**
+     * 绑定接口的元数据视图（只取检查用得到的字段）。
+     *
+     * <p>这里曾经还有一个 {@code kind} + {@code isWrite()}：用来拦「技能绑写接口」（旧 ADR-19 ②）。
+     * 2026-09-27 起不拦了——写操作的治理不靠这一层（网关与接口服务都要求一次性 confirmId，见 §19.9），
+     * 少一个字段就少一处"看着像安全边界、其实是配置禁令"的东西。
+     */
+    public record ApiMetadata(String route, boolean enabled, List<String> resultColumns) {}
 }

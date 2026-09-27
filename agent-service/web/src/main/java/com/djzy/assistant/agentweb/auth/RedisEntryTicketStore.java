@@ -30,10 +30,18 @@ public final class RedisEntryTicketStore implements EntryTicketStore {
         this.template = template;
     }
 
+    /**
+     * {@code SET key value NX PX ttl} 一条原子命令做完「占坑 + 定 TTL」：键已存在就什么都不改、回 {@code false}。
+     *
+     * <p>不能退化成「先 GET 再 SET」——两个请求会在同一毫秒里都看到「键空着」，然后先后写进去互相覆盖。
+     * 而券就是身份，覆盖的结果不是报错，是**串号**（§19.4）。
+     */
     @Override
-    public void save(String ticketHash, EntryTicket ticket, long ttlSeconds) {
+    public boolean saveIfAbsent(String ticketHash, EntryTicket ticket, long ttlSeconds) {
         try {
-            template.opsForValue().set(KEY_PREFIX + ticketHash, serialize(ticket), java.time.Duration.ofSeconds(ttlSeconds));
+            Boolean stored = template.opsForValue()
+                    .setIfAbsent(KEY_PREFIX + ticketHash, serialize(ticket), java.time.Duration.ofSeconds(ttlSeconds));
+            return Boolean.TRUE.equals(stored);
         } catch (RuntimeException e) {
             throw new UnavailableException("入场券存储不可用，拒绝发券（§19.4）", e);
         }

@@ -1,11 +1,13 @@
 package com.djzy.assistant.runtime.agentscope;
 
 import com.djzy.assistant.spi.AgentEvent;
+import com.djzy.assistant.spi.AgentEventType;
 import com.djzy.assistant.spi.AgentRunRequest;
 import com.djzy.assistant.spi.AgentRuntimePort;
 import com.djzy.assistant.spi.AgentSession;
 import com.djzy.assistant.spi.AgentTurn;
 import com.djzy.assistant.spi.ConfirmDecision;
+import com.djzy.assistant.spi.PendingConfirmationException;
 import com.djzy.assistant.spi.RuntimeCapabilities;
 import com.djzy.assistant.spi.RuntimeMismatchException;
 import com.djzy.assistant.spi.RuntimeMisconfiguredException;
@@ -13,6 +15,7 @@ import com.djzy.assistant.spi.Snapshot;
 import com.djzy.assistant.spi.tool.ToolSpec;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.ConfirmResult;
+import io.agentscope.core.event.RequireUserConfirmEvent;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.TextBlock;
@@ -24,13 +27,24 @@ import io.agentscope.core.tool.Toolkit;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.IsolationScope;
 import io.agentscope.harness.agent.filesystem.AbstractFilesystem;
+import io.agentscope.harness.agent.filesystem.model.FileDownloadResponse;
 import io.agentscope.harness.agent.filesystem.remote.store.BaseStore;
 import io.agentscope.harness.agent.filesystem.spec.RemoteFilesystemSpec;
 import io.agentscope.harness.agent.sandbox.SandboxContext;
 import io.agentscope.harness.agent.sandbox.SandboxIsolationKey;
 import io.agentscope.harness.agent.sandbox.SessionSandboxStateStore;
+import io.agentscope.harness.agent.sandbox.SandboxState;
+import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
+import io.agentscope.harness.agent.sandbox.impl.docker.DockerSandboxClient;
+import io.agentscope.harness.agent.sandbox.impl.docker.DockerSandboxState;
+import io.agentscope.harness.agent.sandbox.layout.WorkspaceEntry;
 import io.agentscope.harness.agent.tool.ShellExecuteTool;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -38,6 +52,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
@@ -154,7 +169,40 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
      */
     private final SandboxSkillStaging skillStaging;
 
+    /**
+     * 沙箱工件目录（2026-09-27）：容器里的 {@code <workspaceRoot>/out} 绑在宿主机的
+     * {@code <workspace-dir>/sandbox-artifacts/<用户>} 上。
+     *
+     * <p>为什么需要它：容器一轮一个、每轮结束被框架删掉，而「先生成、确认后再上传」天生跨轮——
+     * 没有这块宿主目录，第二轮就只能拿到一台空容器（详见 {@link SandboxArtifactMount}）。
+     * 不开沙箱时为 {@code null}（这条路上什么都没有）。
+     */
+    private final SandboxArtifactMount artifactMount;
+
+    /**
+     * 一次性确认凭据的登记口（§19.9）：用户批准写操作时用。
+     *
+     * <p>{@code NONE} = 不登记（等同改造前：写操作在网关 G3 处 403 {@code CONFIRM_REQUIRED}）。
+     */
+    private final ConfirmRegistrar confirmRegistrar;
+
     private final SharedAgentPool agents = new SharedAgentPool(MAX_CACHED_AGENTS);
+
+    /** 探容器的超时：本机 docker CLI 的正常回话时间是几十毫秒，20 秒已经非常宽松。 */
+    private static final int CONTAINER_PROBE_TIMEOUT_SECONDS = 20;
+
+    /**
+     * 「这台容器还在不在」的探针：在就返回它的状态（running / exited / created…），查不到返回 {@code null}。
+     *
+     * <p>做成字段而不是静态方法的理由只有一条：**用例得能换掉它**——否则每个用例都要真去叫一次
+     * docker（CI 上没有 Docker，用例就得整体跳过，而跳过等于没测）。
+     */
+    private Function<String, String> containerStatusProbe = AgentscopeRuntimeAdapter::dockerContainerStatus;
+
+    /** 供用例注入假探针；生产代码不要用（见 {@link #containerStatusProbe}）。 */
+    void setContainerStatusProbeForTest(Function<String, String> probe) {
+        this.containerStatusProbe = probe == null ? AgentscopeRuntimeAdapter::dockerContainerStatus : probe;
+    }
 
     /** 工作区不共享（默认）：工作区文件只落在这台实例的本地磁盘上。 */
     public AgentscopeRuntimeAdapter(ModelProvider modelProvider, AgentStateStore stateStore, Path workspace) {
@@ -197,6 +245,23 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
             BaseStore workspaceStore,
             SkillProvisioner skillProvisioner,
             SandboxSettings sandbox) {
+        this(modelProvider, stateStore, workspace, workspaceStore, skillProvisioner, sandbox, ConfirmRegistrar.NONE);
+    }
+
+    /**
+     * 全量构造器（H-05 + §19.9 的写操作确认）。
+     *
+     * @param confirmRegistrar 写操作确认凭据的登记口；{@code null} = {@link ConfirmRegistrar#NONE}
+     */
+    public AgentscopeRuntimeAdapter(
+            ModelProvider modelProvider,
+            AgentStateStore stateStore,
+            Path workspace,
+            BaseStore workspaceStore,
+            SkillProvisioner skillProvisioner,
+            SandboxSettings sandbox,
+            ConfirmRegistrar confirmRegistrar) {
+        this.confirmRegistrar = confirmRegistrar == null ? ConfirmRegistrar.NONE : confirmRegistrar;
         this.modelProvider = modelProvider;
         this.stateStore = stateStore;
         this.workspace = workspace;
@@ -205,6 +270,9 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
         this.sandbox = sandbox == null ? SandboxSettings.disabled() : sandbox;
         this.skillStaging = this.sandbox.enabled()
                 ? new SandboxSkillStaging(workspace.resolve("sandbox-skills"))
+                : null;
+        this.artifactMount = this.sandbox.enabled()
+                ? new SandboxArtifactMount(workspace.resolve("sandbox-artifacts"))
                 : null;
     }
 
@@ -386,7 +454,7 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
         AgentscopeEventTranslator translator = new AgentscopeEventTranslator();
         // 这一次调用的东西全部挂在 RuntimeContext 上（见 CallAttributes 的说明）：
         // 框架会带着它走完整个调用链，中间件与工具都能拿到，而 agent 实例本身保持无状态。
-        RuntimeContext context = RuntimeContext.builder()
+        var contextBuilder = RuntimeContext.builder()
                 .userId(request.userId())
                 .sessionId(session.sessionId())
                 .put(CallAttributes.TURN_ID, turn.turnId())
@@ -394,8 +462,14 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
                 .put(CallAttributes.REQUEST_ID, request.requestId())
                 .put(CallAttributes.DEADLINE_EPOCH_MS, request.deadlineEpochMs())
                 .put(CallAttributes.TOOL_INVOKER, request.toolInvoker())
-                .put(CallAttributes.SYSTEM_PROMPT, request.systemPromptPrefix())
-                .build();
+                .put(CallAttributes.SYSTEM_PROMPT, request.systemPromptPrefix());
+        // 用户刚批准过的写操作（§19.9）：把这一轮的一次性确认凭据带上，网关 G3 会消费它。
+        // **取一次就清掉**：凭据是一次性的，留在会话上只会让后面几轮拿着废凭据去撞 403。
+        String confirmIdForTurn = agentscope.takeConfirmIdForTurn();
+        if (confirmIdForTurn != null) {
+            contextBuilder.put(CallAttributes.CONFIRM_ID, confirmIdForTurn);
+        }
+        RuntimeContext context = contextBuilder.build();
         // 技能下发：**在提示词拼装之前**把这一轮可见的技能同步进工作区。
         // 为什么每轮都做：技能的可见性来自网关的授权，随时会被收走；而模型每一轮都要看当前这份。
         // 代价可控——没变的技能不会重写（见 WorkspaceSkillProvisioner 的类注释）。
@@ -403,11 +477,22 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
         // 技能投影（H-06b）：容器里也要有一份技能，技能里的脚本才跑得动。
         // 必须排在技能下发**之后**——下发的就是这一轮该有的那份，投影抄的正是它。
         prepareSandbox(agentscope.agent, context);
+        mountSandboxArtifactReader(agentscope.agent, context);
         Msg message = buildMessage(agentscope, turn);
         return agentscope.agent
                 .streamEvents(message, context)
-                .mapNotNull(event -> translator.translate(event, session.sessionId(), turn.turnId(), turn.traceId()).orElse(null))
-                .onErrorMap(AgentscopeRuntimeAdapter::actionableOrOriginal);
+                .mapNotNull(event -> {
+                    // 框架在**执行之前**拦下写调用、要求用户确认（§19.9）：这里把被拦下的调用记在会话上。
+                    // 少了这一步，用户点确认时平台不知道该确认哪一次调用、凭据也登记不出来——
+                    // 症状就是「点了确认还是 403」（2026-09-27 实测）。
+                    rememberPendingConfirmation(agentscope, event);
+                    return translator.translate(event, session.sessionId(), turn.turnId(), turn.traceId())
+                            .map(translated -> withConfirmPrompt(agentscope, translated))
+                            .orElse(null);
+                })
+                .onErrorMap(AgentscopeRuntimeAdapter::actionableOrOriginal)
+                // 本轮一结束就把沙箱状态作废（为什么必须在这里做，见 forgetSandboxState）。
+                .doFinally(signal -> forgetSandboxState(context));
     }
 
     /** 把这一轮可见的技能同步进这个用户的工作区（H-06a）；没装下发时什么都不做。 */
@@ -431,29 +516,200 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
      *       （技能授权随时会变），只有「每次调用」的地方才放得下它。</li>
      * </ol>
      */
+    /**
+     * 把「读沙箱产物」的口子挂到这一轮的 {@link RuntimeContext} 上（§18.5.3）。
+     *
+     * <p>沙箱没开就什么都不挂：没容器就没有可读的产物，挂了只会让上传接口在运行时报一句
+     * 看不懂的错。挂不上的时候写操作照样能跑——模型直接把 base64 填进参数那条老路还在。
+     */
+    void mountSandboxArtifactReader(HarnessAgent agent, RuntimeContext ctx) {
+        if (!sandbox.enabled()) {
+            return;
+        }
+        AbstractFilesystem filesystem;
+        try {
+            filesystem = agent.getWorkspaceManager().getFilesystem();
+        } catch (RuntimeException e) {
+            log.warn("拿不到工作区文件系统，这一轮不带沙箱产物读取能力：原因={}", e.toString());
+            return;
+        }
+        ctx.put(
+                CallAttributes.SANDBOX_ARTIFACT_READER,
+                (SandboxArtifactReader) path -> readArtifact(filesystem, ctx, path));
+    }
+
+    /**
+     * 按路径读出工件字节：**先宿主工件目录、再容器**。
+     *
+     * <p>顺序不能反：产物本来就落在宿主目录里（{@link SandboxArtifactMount} 那条 bind mount），
+     * 容器只是它的一个视图；而到了「用户确认之后」那一轮，容器已经是新的一台，只有宿主那份还在。
+     * 先宿主还有一个好处：读字节不再依赖容器活着，确认链路上少一个可变量。
+     */
+    private Optional<byte[]> readArtifact(
+            AbstractFilesystem filesystem, RuntimeContext ctx, String path) {
+        String userId = ctx == null ? null : ctx.getUserId();
+        if (artifactMount != null) {
+            Optional<Path> hostPath = artifactMount.hostPathFor(userId, sandbox.workspaceRoot(), path);
+            if (hostPath.isPresent()) {
+                try {
+                    if (Files.isRegularFile(hostPath.get())) {
+                        return Optional.of(Files.readAllBytes(hostPath.get()));
+                    }
+                    log.debug("宿主工件目录里没有这个文件，改问容器：path={}", path);
+                } catch (IOException e) {
+                    log.warn("读宿主工件失败：path={} 原因={}", path, e.toString());
+                }
+            }
+        }
+        return downloadSandboxArtifact(filesystem, ctx, path);
+    }
+
+    /** 从沙箱里按路径读出字节；读不到返回空（调用方据此报「文件没找到」，而不是上传一份空文件）。 */
+    private static Optional<byte[]> downloadSandboxArtifact(
+            AbstractFilesystem filesystem, RuntimeContext ctx, String path) {
+        try {
+            List<FileDownloadResponse> responses = filesystem.downloadFiles(ctx, List.of(path));
+            if (responses == null || responses.isEmpty()) {
+                return Optional.empty();
+            }
+            FileDownloadResponse response = responses.get(0);
+            if (response == null || !response.isSuccess() || response.content() == null) {
+                return Optional.empty();
+            }
+            return Optional.of(response.content());
+        } catch (RuntimeException e) {
+            log.warn("读沙箱产物失败：path={} 原因={}", path, e.toString());
+            return Optional.empty();
+        }
+    }
+
     void prepareSandbox(HarnessAgent agent, RuntimeContext ctx) {
         if (!sandbox.enabled() || skillStaging == null) {
             return;
         }
-        clearStaleSandboxState(ctx);
+        resetSandboxStateIfContainerGone(ctx);
         Path stagingRoot = skillStaging.stage(agent.getWorkspaceManager().getFilesystem(), ctx);
-        ctx.put(SandboxContext.class, sandbox.toProjectingFilesystemSpec().toSandboxContext(stagingRoot));
+        SandboxContext context = sandbox.toProjectingFilesystemSpec().toSandboxContext(stagingRoot);
+        ctx.put(SandboxContext.class, withArtifactMount(context, ctx));
     }
 
     /**
-     * 清掉上一轮留下的沙箱状态（容器与沙箱状态都是「一轮一个」，留着反而有害）。
+     * 往框架给的工作区清单里加一条「工件目录」的 bind mount（{@link SandboxArtifactMount}）。
      *
-     * <p><b>为什么非清不可</b>：容器在本轮结束时会被框架 stop 掉再删掉
-     * （{@code SandboxManager#release}），下一轮是一台**全新的空容器**。而框架把「投影做过一次」
-     * 记在了沙箱状态里（内容的哈希），下一轮看到哈希没变就**不再投影**——于是「第一轮容器里跑得动脚本，
-     * 第二轮开始文件就不在了」（2026-09-26 真容器实测，见台账 L-20）。状态里其余的字段本来就是死的
-     * （容器 id 指向一台已经被删掉的容器）。
+     * <p>为什么要在框架造好的 {@link SandboxContext} 上再改一手、而不是让 {@code SandboxSettings} 直接带上它：
+     * 挂载点是**按用户**分的，而且宿主目录必须真实存在——只有轮到这一轮、知道是谁在跑的时候才算得出来
+     * （与技能投影源同一个理由，见 {@code SandboxSettings#toProjectingFilesystemSpec}）。
      *
-     * <p>清掉之后框架按「全新沙箱」处理：起容器 + 应用工作区 + 重新投影，这才是这一轮该有的样子。
-     * 注意清的是**沙箱状态**（框架自己的 {@code _sandbox_state} 槽位），不是会话状态——
+     * <p>挂不上（建目录失败之类）不打挂这一轮：报表照样能生成、照样能上传，只是「确认后再执行」那一轮
+     * 会因为容器里没有这个文件而失败——日志里写明原因，比让整轮起不来强。
+     */
+    private SandboxContext withArtifactMount(SandboxContext context, RuntimeContext ctx) {
+        if (artifactMount == null) {
+            return context;
+        }
+        try {
+            Path userDir = artifactMount.prepareUserDir(ctx == null ? null : ctx.getUserId());
+            WorkspaceSpec workspace = context.getWorkspaceSpec().copy();
+            Map<String, WorkspaceEntry> entries = workspace.getEntries() == null
+                    ? new LinkedHashMap<>()
+                    : new LinkedHashMap<>(workspace.getEntries());
+            entries.put(SandboxArtifactMount.CONTAINER_DIR, artifactMount.entry(userDir));
+            workspace.setEntries(entries);
+            return SandboxContext.builder()
+                    .client(context.getClient())
+                    .clientOptions(context.getClientOptions())
+                    .workspaceSpec(workspace)
+                    .snapshotSpec(context.getSnapshotSpec())
+                    .isolationScope(context.getIsolationScope())
+                    .build();
+        } catch (Exception e) {
+            log.warn("沙箱工件目录挂不上（这一轮生成的工件在容器删除后会丢）：原因={}", e.toString());
+            return context;
+        }
+    }
+
+    /**
+     * 探一下上一轮的沙箱状态还能不能用：**能用就留着（续用同一台容器），不能用才清掉**。
+     *
+     * <p><b>2026-09-27 改了行为，原因是一条真机证据</b>：原来这里是无条件清掉——当时的理由写在台账 L-20 里
+     * （「容器一轮一个、不清的话第二轮看不到技能脚本」）。但真机日志揭示了更底下的一个 bug：
+     * 框架给沙箱状态用的槽位号是路径式的（{@code sandbox/user/<agentId>/<userId>}），JDBC 状态库
+     * （{@code JdbcAgentStateStore}）拒绝含 {@code /} 的槽位号，于是沙箱状态**从来就没写进去过**
+     * （见 {@code PlatformAgentStateStore} 类注释里的「第二个洞」）。也就是说：L-20 观察到的
+     * 「第二轮没有脚本」是**状态存不下来**的后果，而"清掉"只是把这件事变得看起来像设计。
+     *
+     * <p>状态能存下来之后，正确行为就回到框架的设计上（{@code SandboxManager#acquire} 的第 3 优先级）：
+     * 读回上一轮的状态 → {@code resume} 同一台容器 → {@code AbstractBaseSandbox#start} 走
+     * <b>Branch A：workspace preserved</b> —— 容器里上一轮生成的文件**还在**。
+     * 这一条恰恰是「先生成文件、用户确认后再上传」必须的：确认会把一轮拆成两轮，容器每轮重建的话，
+     * 第二轮连文件都找不到（2026-09-27 实测：模型只能把 base64 分几次打印出来再拼，拼出来的 xlsx 是坏的）。
+     *
+     * <p>什么时候还是要清：**容器真的没了**（Docker 重启、{@code docker prune}、手工删过）。
+     * 那时状态里指向的容器 id 已经查不到，续用等于让框架去 {@code docker start} 一台不存在的容器——
+     * {@code SandboxLifecycleMiddleware} 会把这种失败往上抛，整轮直接挂掉。所以这里问一次 Docker：
+     * 容器还在就留着，查不到就清掉，让框架按全新沙箱处理（起容器 + 应用工作区 + 重新投影）。
+     *
+     * <p>问不到答案时（docker 命令不可用、容器状态读取异常）**倾向保留**：这是框架的原生行为，
+     * 而且真出问题时下一轮的错误信息里会明明白白写着容器 id，比"悄悄换了一台新容器"好查。
+     *
+     * <p>注意清的是**沙箱状态**（框架自己的 {@code _sandbox_state} 槽位），不是会话状态——
      * 聊了什么在另一把键上，照样跨实例、跨轮次（见类注释里 A/B/C 那一段）。
      */
-    private void clearStaleSandboxState(RuntimeContext ctx) {
+    private void resetSandboxStateIfContainerGone(RuntimeContext ctx) {
+        try {
+            Optional<SandboxIsolationKey> key = SandboxIsolationKey.resolve(IsolationScope.USER, ctx, AGENT_NAME);
+            if (key.isEmpty()) {
+                return;
+            }
+            SessionSandboxStateStore sandboxState = new SessionSandboxStateStore(stateStore, AGENT_NAME);
+            String containerId = persistedContainerId(sandboxState, key.get());
+            if (containerId == null) {
+                // 没有可续用的记录（第一次用、或上一轮没存下来）：本轮本来就是全新容器，不需要清。
+                return;
+            }
+            String status = containerStatusProbe.apply(containerId);
+            if (status != null) {
+                log.debug("[sandbox] 上一轮的容器 {} 还在（status={}），续用：容器里上一轮的文件保留", containerId, status);
+                return;
+            }
+            // 容器查不到：留着这条状态的话，框架会去 start 一台不存在的容器，整轮直接失败。
+            sandboxState.delete(key.get());
+            log.info("[sandbox] 上一轮的容器 {} 已经不在了，清掉沙箱状态，本轮起一台新容器", containerId);
+        } catch (Exception e) {
+            log.warn("沙箱状态检查失败（这一轮容器里可能没有技能脚本）：原因={}", e.toString());
+        }
+    }
+
+    /**
+     * 本轮跑完就把沙箱状态作废：**下一轮不许复用这一轮那条状态**。
+     *
+     * <h2>为什么必须作废</h2>
+     * 这一轮结束（{@code SandboxLifecycleMiddleware#releaseForCall}）时框架做两件事：先把状态写回
+     * （{@code SandboxManager#persistState}：里面记着本轮那台容器 id 与 {@code workspaceProjectionHash}），
+     * 再把容器停掉并删除（{@code SandboxManager#release} → {@code shutdown} → {@code docker rm}）。
+     * 于是下一条状态天生就是「指向一台已经不存在的容器」。
+     *
+     * <p>框架在下一轮读回这条状态后走的是恢复路径：容器查不到 → 新建一台空的（
+     * {@code DockerSandbox#doEnsureContainerRunning}），工作区按 {@code Branch D} 重来。技能投影却在
+     * {@code AbstractBaseSandbox#applyWorkspaceProjectionIfChanged} 里**按内容哈希跳过**——哈希记在
+     * 上面那条状态里，重建后的空容器于是一个文件都拿不到。后果不是"少个优化"，而是
+     * **容器里没有技能脚本**：模型照着技能文档给的 {@code /workspace/skills/<技能>/scripts/...}
+     * 去执行，得到的是一句 {@code No such file or directory}（2026-09-27 真机实测，用例
+     * {@code SandboxDockerEndToEndTest} 里「第二轮」那一段钉住了框架这个行为）。
+     *
+     * <h2>为什么放在「本轮结束」而不是「下一轮开头」</h2>
+     * 下一轮开头那次清理（{@link #resetSandboxStateIfContainerGone}）与框架的
+     * {@code releaseForCall} 存在**先后不可控的竞争**：同一个用户的甲轮还没释放、乙轮已经在准备，
+     * 甲轮随后写回的状态会把乙轮刚清掉的那条复活。放在本轮结束——也就是框架写回之后——这个窗口
+     * 才关得上（同一个用户同时只有一轮在沙箱里，跨实例由 H-11 那把执行锁保证）。
+     *
+     * <p>代价：跨轮"续用同一台容器"的能力没了（{@code Branch A} 永远走不到）。这不是新增的损失——
+     * 容器本来就在每轮结束时被删掉，那条路一直是断的；真正跨轮要活着的是**产物**，那走的是
+     * 宿主机工件目录的 bind mount（{@code SandboxArtifactMount}），与沙箱状态无关。
+     *
+     * <p>失败只记日志：清不掉最多是下一轮容器里没有技能脚本，不该把这一轮已经跑完的结果带塌。
+     */
+    void forgetSandboxState(RuntimeContext ctx) {
         try {
             Optional<SandboxIsolationKey> key = SandboxIsolationKey.resolve(IsolationScope.USER, ctx, AGENT_NAME);
             if (key.isEmpty()) {
@@ -461,11 +717,42 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
             }
             new SessionSandboxStateStore(stateStore, AGENT_NAME).delete(key.get());
         } catch (Exception e) {
-            // 清不掉就退回框架的默认行为（第二轮可能看不到技能脚本）：记日志，别让这一轮失败。
-            log.warn("上一轮的沙箱状态没清掉（这一轮容器里可能没有技能脚本）：原因={}", e.toString());
+            log.warn("沙箱状态没清掉（下一轮的容器里可能没有技能脚本）：原因={}", e.toString());
         }
     }
 
+    /** 上一轮留下的状态里记着的那台容器 id；没有状态 / 解析不出来时返回 {@code null}。 */
+    private static String persistedContainerId(SessionSandboxStateStore sandboxState, SandboxIsolationKey key)
+            throws Exception {
+        Optional<String> json = sandboxState.load(key);
+        if (json.isEmpty() || json.get().isBlank()) {
+            return null;
+        }
+        SandboxState state = new DockerSandboxClient().deserializeState(json.get());
+        if (state instanceof DockerSandboxState docker) {
+            String containerId = docker.getContainerId();
+            return containerId == null || containerId.isBlank() ? null : containerId;
+        }
+        return null;
+    }
+
+    /** 问 Docker 这台容器还在不在；在就返回它的状态（running / exited / created…），查不到返回 {@code null}。 */
+    private static String dockerContainerStatus(String containerId) {
+        try {
+            Process process = new ProcessBuilder(
+                            "docker", "inspect", "--format", "{{.State.Status}}", containerId)
+                    .redirectErrorStream(true)
+                    .start();
+            String out = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            if (!process.waitFor(CONTAINER_PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return null;
+            }
+            return process.exitValue() == 0 && !out.isBlank() ? out : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
     /**
      * 框架内建工具里，哪些**允许留下**（其余一律移除，见 {@link #buildAgent} 里那段说明）。
      *
@@ -513,9 +800,30 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
                 String message = MISCONFIGURED_BY_STATUS.get(http.getStatusCode());
                 return message == null ? error : new RuntimeMisconfiguredException(message);
             }
+            // 「还有一张写操作确认卡没答复」也属于**照做就能好**的一类，不能沉到兜底那句
+            // 「服务暂不可用，请稍后再试」里——那句话会让用户一直重试一件永远不会成功的事。
+            if (isPendingConfirmation(cause)) {
+                return new PendingConfirmationException();
+            }
             cause = cause.getCause();
         }
         return error;
+    }
+
+    /**
+     * 框架对这种情况用的是 {@link IllegalStateException} + 一段英文说明
+     * （{@code "Agent is paused for human-in-the-loop confirmation…"}）。
+     *
+     * <p>为什么按消息文本认、而不是按异常类型：框架没有给这一类错误专门的类型，它也**不该**有
+     * ——「有待确认的写调用」是平台侧的语义（§19.9 那张卡是平台弹的）。文本匹配退化的风险很小：
+     * 认不出来只是回到原来的「服务暂不可用」，不会把别的失败误判成待确认。
+     */
+    private static boolean isPendingConfirmation(Throwable cause) {
+        if (!(cause instanceof IllegalStateException)) {
+            return false;
+        }
+        String message = cause.getMessage();
+        return message != null && message.contains("human-in-the-loop confirmation");
     }
 
     /** 状态码 → 给用户/运维看的、可执行的说明。 */
@@ -574,8 +882,50 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
         for (ToolUseBlock toolCall : agentscope.pendingToolCalls) {
             results.add(new ConfirmResult(decision.approved(), toolCall));
         }
+        if (decision.approved() && !agentscope.pendingToolCalls.isEmpty()) {
+            // 用户批准了：**平台这时才登记那张网关认的凭据**（§19.9）。
+            // 框架那套确认回答的是「要不要执行这次工具调用」，它给的 id 不是网关的 confirmId；
+            // 不在这里补一张，写操作到了网关 G3 就是 CONFIRM_REQUIRED 403（2026-09-27 实测）。
+            // 一次批准登记一张：一轮里出现第二次写调用会再次被拦下、再问用户一次——宁可多问，不静默放行。
+            agentscope.setConfirmIdForTurn(registerConfirm(agentscope, decision));
+        }
         agentscope.pendingConfirmResults.addAll(results);
         agentscope.pendingToolCalls.clear();
+        agentscope.markAnswered(agentscope.pendingConfirmPrompt, decision.approved());
+        // 这张卡已经答复过了：从「当前挂起」摘掉，避免下一次拦截复用一个前端已经开始怀疑的编号；
+        // 但**留一份**给紧随其后的那一轮——框架会回一个 CONFIRM_RESULT 事件，界面上那张卡要凭
+        // 这个编号才认得出「说的就是我」（见 withAnsweredPrompt）。
+        agentscope.setPendingConfirmPrompt(null);
+    }
+
+    /** 登记一张写操作凭据；登记不了（没装 / 落库失败）返回 {@code null}，让这一轮照旧被网关拦下。 */
+    private String registerConfirm(AgentscopeSession session, ConfirmDecision decision) {
+        AgentRunRequest request = session.request;
+        String summary = "用户确认执行写操作：" + toolNamesOf(session.pendingToolCalls);
+        try {
+            return confirmRegistrar.register(
+                    request.userId(), session.sessionId(), decision.confirmId(), summary);
+        } catch (RuntimeException e) {
+            log.warn("登记写操作确认凭据失败（这一轮的写调用会被网关拦下）：userId={}", request.userId(), e);
+            return null;
+        }
+    }
+
+    private static String toolNamesOf(List<ToolUseBlock> toolCalls) {
+        return toolCalls.stream()
+                .map(AgentscopeRuntimeAdapter::nameOf)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .reduce((left, right) -> left + "、" + right)
+                .orElse("（未识别）");
+    }
+
+    private static String nameOf(ToolUseBlock toolCall) {
+        try {
+            return toolCall.getName();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /**
@@ -655,10 +1005,123 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
         agents.closeAll();
     }
 
+    /**
+     * 记下框架拦下来的待确认调用（§19.9）。
+     *
+     * <p>为什么不在这里自己判断「哪些是写操作」：**框架才是拦截者**，它已经算好了这一批被拦下的
+     * 调用（状态 {@code ASKING}）；平台再猜一遍只会猜出第二套口径，两套口径迟早对不上。
+     *
+     * <p>为什么要去重：同一批待确认调用可能因为重连 / 重放被重复推来，重复记下会让用户点一次确认
+     * 却提交了两条对同一次调用的答案（框架侧直接判非法）。
+     */
+    private void rememberPendingConfirmation(AgentscopeSession session, io.agentscope.core.event.AgentEvent event) {
+        if (!(event instanceof RequireUserConfirmEvent confirm)) {
+            return;
+        }
+        List<ToolUseBlock> calls = confirm.getToolCalls();
+        if (calls == null || calls.isEmpty()) {
+            return;
+        }
+        Set<String> known = session.pendingToolCalls.stream()
+                .map(ToolUseBlock::getId)
+                .filter(java.util.Objects::nonNull)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        List<ToolUseBlock> fresh = calls.stream()
+                .filter(call -> call.getId() == null || !known.contains(call.getId()))
+                .toList();
+        if (!fresh.isEmpty()) {
+            registerPendingToolCalls(session, fresh);
+            session.setPendingConfirmPrompt(confirmPromptFor(fresh));
+        }
+    }
+
+    /**
+     * 造一张确认卡的抬头（§12.2 的 {@code confirmId / action / summary}）。
+     *
+     * <p>为什么平台必须自己造：框架的 {@code REQUIRE_USER_CONFIRM} 只说「这几次调用要用户点头」，
+     * 它没有、也不该有平台这张卡片的编号。翻译器只搬框架字段，于是事件到了前端长成
+     * {@code {"confirmId":"","action":"","summary":""}}——前端回传空编号，接口一律 400，
+     * 用户看到的就是「点了确认没反应」（2026-09-27 实测）。
+     */
+    private static ConfirmPrompt confirmPromptFor(List<ToolUseBlock> toolCalls) {
+        List<String> names = toolCalls.stream()
+                .map(ToolUseBlock::getName)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .toList();
+        String action = names.isEmpty() ? "write" : String.join(",", names);
+        String summary = names.isEmpty()
+                ? "即将执行一次写操作，需要您确认后才会真正执行"
+                : "即将执行写操作：" + String.join("、", names) + "；确认后才会真正执行";
+        return new ConfirmPrompt(UUID.randomUUID().toString(), action, summary);
+    }
+
+    /**
+     * 给「等待确认」事件补上平台那张卡的抬头。
+     *
+     * <p>挂起的那张卡是**一轮一张**：一轮里出现第二次写调用会再拦一次、再造一张，与
+     * 「写操作每轮 ≤3 次、凭据一次性」（§19.9）一致。
+     */
+    private static AgentEvent withConfirmPrompt(AgentscopeSession session, AgentEvent event) {
+        if (event.type() == AgentEventType.CONFIRM_RESULT) {
+            return withAnsweredPrompt(session, event);
+        }
+        ConfirmPrompt prompt = session.pendingConfirmPrompt;
+        if (event.type() != AgentEventType.AWAITING_CONFIRM || prompt == null) {
+            return event;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>(event.payload());
+        payload.put("confirmId", prompt.confirmId());
+        payload.put("action", prompt.action());
+        payload.put("summary", prompt.summary());
+        return copyWithPayload(event, payload);
+    }
+
+    /**
+     * 给「确认结果」事件补上**被答复那张卡**的编号与结论。
+     *
+     * <p>框架的 {@code USER_CONFIRM_RESULT} 只说「有人答复了」，它既不知道平台那张卡的编号，
+     * 也不带批准/拒绝。照搬字段的结果就是事件长成
+     * {@code {"confirmId":"","approved":false}}：前端拿着空编号对不回任何一张卡，
+     * 也无法把卡片标成「已批准 / 已拒绝」——只能再弹一张新卡，用户就被要求确认第二次
+     * （2026-09-27 实测：客户端照着流里的第一张卡去确认，拿到的是空编号，接口一律 400）。
+     */
+    private static AgentEvent withAnsweredPrompt(AgentscopeSession session, AgentEvent event) {
+        ConfirmPrompt answered = session.answeredPrompt;
+        if (answered == null) {
+            return event;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>(event.payload());
+        payload.put("confirmId", answered.confirmId());
+        payload.put("approved", session.answeredApproved);
+        payload.put("action", answered.action());
+        return copyWithPayload(event, payload);
+    }
+
+    /** 事件只换载荷：编号 / 轮次 / 序号 / 来源一律照旧，回放与落库的定位不能因为补字段而变。 */
+    private static AgentEvent copyWithPayload(AgentEvent event, Map<String, Object> payload) {
+        return new AgentEvent(
+                event.eventId(),
+                event.type(),
+                event.sessionId(),
+                event.turnId(),
+                event.traceId(),
+                event.seq(),
+                event.timestampEpochMs(),
+                event.source(),
+                payload);
+    }
+
     /** 记录待确认项，并暂存框架确认结果（§19.9 的 HITL 通道）。 */
     void registerPendingToolCalls(AgentSession session, List<ToolUseBlock> toolCalls) {
         ((AgentscopeSession) session).pendingToolCalls.addAll(toolCalls);
     }
+
+    /**
+     * 一张确认卡的抬头（§12.2）：{@code confirmId} 让前端能把它原样回传，{@code action / summary}
+     * 是给用户看的那一行字。编号由**平台**发，框架不参与——它只负责说「这里要停一下」。
+     */
+    private record ConfirmPrompt(String confirmId, String action, String summary) {}
 
     static final class AgentscopeSession implements AgentSession {
         private final String sessionId;
@@ -667,6 +1130,39 @@ public final class AgentscopeRuntimeAdapter implements AgentRuntimePort {
         private final AgentRunRequest request;
         private final List<ToolUseBlock> pendingToolCalls = new ArrayList<>();
         private final List<ConfirmResult> pendingConfirmResults = new ArrayList<>();
+        /** 用户批准后登记的一次性凭据：**只给紧随其后的那一轮**用（取一次就清）。 */
+        private String confirmIdForTurn;
+        /** 当前挂起的那张确认卡（§12.2）；用户答复后清掉——一张卡只对一次拦截负责。 */
+        private ConfirmPrompt pendingConfirmPrompt;
+
+        /** 刚答复过的那张卡（编号 + 结论）；仅用于给紧随其后的 CONFIRM_RESULT 事件补编号。 */
+        private ConfirmPrompt answeredPrompt;
+
+        private boolean answeredApproved;
+
+        void setPendingConfirmPrompt(ConfirmPrompt prompt) {
+            this.pendingConfirmPrompt = prompt;
+            if (prompt != null) {
+                // 新卡一立，上一张的答复痕迹就没用了：留着会让后面的 CONFIRM_RESULT 认错卡。
+                this.answeredPrompt = null;
+            }
+        }
+
+        /** 记下「刚答复的是哪张卡、结论是什么」，供 {@link #withAnsweredPrompt} 使用。 */
+        void markAnswered(ConfirmPrompt prompt, boolean approved) {
+            this.answeredPrompt = prompt;
+            this.answeredApproved = approved;
+        }
+
+        void setConfirmIdForTurn(String confirmId) {
+            this.confirmIdForTurn = confirmId;
+        }
+
+        String takeConfirmIdForTurn() {
+            String taken = confirmIdForTurn;
+            confirmIdForTurn = null;
+            return taken;
+        }
 
         AgentscopeSession(String sessionId, HarnessAgent agent, AgentRunRequest request) {
             this.sessionId = sessionId;

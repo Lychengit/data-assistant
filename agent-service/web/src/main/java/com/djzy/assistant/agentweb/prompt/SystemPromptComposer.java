@@ -60,7 +60,9 @@ public final class SystemPromptComposer {
         prompt.append("- 用户说的相对时间就用上面已解析的值；该口径确实没有数据，就直说「该口径无数据」，不要自行换一个月份代替用户决定。\n");
         prompt.append("- 「本轮可用接口」是**这一轮唯一权威**的能力清单，每轮刷新；它可能比你前几轮看到的少（授权被撤销立即生效）。\n");
         prompt.append("- 清单里没有的能力就是没有：不要先去调一个还算沾边的接口、拿空结果当答复，直接说明当前没有这个能力。\n");
-        prompt.append("- 全程用中文，包括开场白与过程说明；任何位置都不要输出英文。\n");
+        prompt.append("- 全程用中文：开场白、步骤说明、调用工具前后的话、结论、对用户的追问，一个英文词都不要出现。\n");
+        prompt.append("  实测过的错法：中文结论外面套一句英文旁白（如「I'll load the export skill…」）——那同样不合规。\n");
+        prompt.append("  只有这几类可以保持原样：工具名、接口路径、字段名、指标键、文件名、代码与命令。\n");
         prompt.append("- 直接给结论，不要写「我先去查询…」这类过程旁白。\n");
         prompt.append('\n');
         prompt.append("【工具使用】（入参契约见工具 schema，§4.8 节点 A）\n");
@@ -77,6 +79,11 @@ public final class SystemPromptComposer {
         prompt.append("- 历史里提过、本轮清单里没有的：只能说明「这项能力当前不可用（授权已变更）」，不要写成「我能」，\n");
         prompt.append("  也不要承诺稍后去查、不要说「需要我现在拉取吗」这类会把用户带进死胡同的话。\n");
         prompt.append("- 清单为空就直接说「当前没有任何可用接口」，不要用历史的说法把空档填上。\n");
+        prompt.append('\n');
+        // 收口再写一次：指令的位置影响遵守率，**最后一条**离生成最近（实测：写在开头的语言要求
+        // 会被英文旁白盖过去，见 2026-09-27 的对话记录）。
+        prompt.append("【输出语言】现在就检查一遍：你接下来输出的每一个字都必须是中文。\n");
+        prompt.append("过程旁白也要中文——不要出现「I'll …」「Now …」这类英文句子；工具名 / 路径 / 字段名 / 文件名除外。\n");
         return prompt.toString();
     }
 
@@ -102,7 +109,9 @@ public final class SystemPromptComposer {
             text.append(tools.stream().map(ToolSpec::name).collect(java.util.stream.Collectors.joining("、")));
         }
         text.append("。历史轮次里的能力快照都可能已过期（授权随时会被撤销），作答一律以最新这一条为准；");
-        text.append("用户问能力时只按它回答，不要沿用历史里出现过的接口。)");
+        text.append("用户问能力时只按它回答，不要沿用历史里出现过的接口。");
+        // 顺带钉一句语言要求：它贴在**提问旁边**，比写在系统提示词开头更拦得住英文旁白。
+        text.append("作答与过程旁白一律用中文，不要输出英文句子。)");
         return text.toString();
     }
 

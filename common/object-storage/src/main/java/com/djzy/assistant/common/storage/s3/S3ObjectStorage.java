@@ -20,6 +20,8 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.S3Object;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
+import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
 
 /**
  * S3 兼容实现（MinIO / 阿里云 OSS / 腾讯云 COS 都是这一套协议）。
@@ -44,16 +46,33 @@ public final class S3ObjectStorage implements ObjectStorage, AutoCloseable {
     private final String bucket;
     private final String keyPrefix;
     private final boolean ownsClient;
+    private final boolean pathStyle;
+    /**
+     * 预签名器（只有需要「短期下载链接」时才建）。
+     *
+     * <p>懒建而不是构造时必建：绝大多数调用（技能包读写、工作区）根本用不到签名，为一个用不上的
+     * 能力多开一套连接池不划算。用 volatile + 双检锁保证只建一次。
+     */
+    private volatile S3Presigner presigner;
 
     public S3ObjectStorage(S3Client client, String bucket, String keyPrefix) {
-        this(client, bucket, keyPrefix, false);
+        this(client, bucket, keyPrefix, false, true);
     }
 
     S3ObjectStorage(S3Client client, String bucket, String keyPrefix, boolean ownsClient) {
+        this(client, bucket, keyPrefix, ownsClient, true);
+    }
+
+    /**
+     * @param pathStyle 与建 client 时用的是不是同一个值。预签名链接必须与主客户端同一套寻址方式：
+     *     自建存储（MinIO）只认 path-style，签成 virtual-hosted 会得到一个解析不了的主机名
+     */
+    S3ObjectStorage(S3Client client, String bucket, String keyPrefix, boolean ownsClient, boolean pathStyle) {
         this.client = client;
         this.bucket = bucket;
         this.keyPrefix = normalizePrefix(keyPrefix);
         this.ownsClient = ownsClient;
+        this.pathStyle = pathStyle;
     }
 
     /** 按配置建一个实现；配置不完整就在这里拒绝启动（别等到第一次上传才发现）。 */
@@ -72,7 +91,7 @@ public final class S3ObjectStorage implements ObjectStorage, AutoCloseable {
                 .build();
         log.info("对象存储使用 S3 兼容实现：endpoint={} bucket={} keyPrefix={}",
                 s3.getEndpoint(), s3.getBucket(), properties.getKeyPrefix());
-        return new S3ObjectStorage(client, s3.getBucket(), properties.getKeyPrefix(), true);
+        return new S3ObjectStorage(client, s3.getBucket(), properties.getKeyPrefix(), true, s3.isPathStyle());
     }
 
     @Override
@@ -153,9 +172,64 @@ public final class S3ObjectStorage implements ObjectStorage, AutoCloseable {
         }
     }
 
+    /**
+     * 预签名 GET 链接（§18.4.5 W2）：**短期**、只对这个 key、拿到链接的人不需要凭据就能下载。
+     *
+     * <p>为什么不自己拼一个 http://host/bucket/key：桶默认是私有的，那样拼出来的链接要么 403、
+     * 要么要求把桶设成匿名可读——后者等于把导出文件对全网开放。而「链接只对拿到它的人有效、
+     * 到点自动失效」正是导出这类数据的正确形态。
+     *
+     * <p>签名器从**同一个 client 的配置**派生（endpoint / region / 凭据 / path-style），
+     * 所以不存在「主客户端与签名器配成两套」的漂移；MinIO 这类自建存储必须保持 path-style，
+     * 否则签出来的链接指向 bucket.host 这种解析不了的主机名。
+     */
+    @Override
+    public Optional<String> presignedGetUrl(String key, java.time.Duration ttl) {
+        java.time.Duration effective =
+                (ttl == null || ttl.isZero() || ttl.isNegative()) ? java.time.Duration.ofMinutes(15) : ttl;
+        GetObjectPresignRequest request = GetObjectPresignRequest.builder()
+                .signatureDuration(effective)
+                .getObjectRequest(builder -> builder.bucket(bucket).key(fullKey(key)))
+                .build();
+        try {
+            return Optional.of(getPresigner().presignGetObject(request).url().toString());
+        } catch (S3Exception e) {
+            throw new UnavailableException("对象签名失败：" + key, e);
+        }
+    }
+
+    private S3Presigner getPresigner() {
+        S3Presigner local = presigner;
+        if (local != null) {
+            return local;
+        }
+        synchronized (this) {
+            if (presigner == null) {
+                presigner = presignerOf(client);
+            }
+            return presigner;
+        }
+    }
+
+    private S3Presigner presignerOf(S3Client client) {
+        var configuration = client.serviceClientConfiguration();
+        S3Presigner.Builder builder = S3Presigner.builder()
+                .region(configuration.region())
+                .credentialsProvider(configuration.credentialsProvider());
+        configuration.endpointOverride().ifPresent(builder::endpointOverride);
+        builder.serviceConfiguration(software.amazon.awssdk.services.s3.S3Configuration.builder()
+                .pathStyleAccessEnabled(pathStyle)
+                .build());
+        return builder.build();
+    }
+
     /** 关闭 SDK 客户端（不关会留下 HTTP 连接池和后台线程）。只关自己建的那个。 */
     @Override
     public void close() {
+        S3Presigner local = presigner;
+        if (local != null) {
+            local.close();
+        }
         if (ownsClient) {
             client.close();
         }

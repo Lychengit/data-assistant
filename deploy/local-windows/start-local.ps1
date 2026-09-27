@@ -302,7 +302,9 @@ try {
                 IFACE_DOCTOR_DB_USER        = $DbUser
                 IFACE_DOCTOR_DB_PASSWORD    = $DbPassword
                 IFACE_DOCTOR_GATEWAY_SECRET = $GatewayOutSecret
-            }
+                # 上传接口要在登记工件后回一张限时下载链接，签名 URL 得由对象存储签发——
+                # 所以接口服务也必须拿到同一套存储配置（和 management / agent 指向同一个桶）。
+            } + $storageEnv
         }
         @{
             Name = 'management-service'; Module = 'management-service'; Port = $ManagementPort

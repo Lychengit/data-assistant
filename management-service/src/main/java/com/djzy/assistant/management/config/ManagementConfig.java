@@ -21,8 +21,12 @@ import com.djzy.assistant.common.persistence.JdbcPermissionRepository;
 import com.djzy.assistant.common.persistence.JdbcRefreshTokenStore;
 import com.djzy.assistant.common.persistence.JdbcUserAccountPort;
 import com.djzy.assistant.common.persistence.JdbcUserStatusPort;
+import com.djzy.assistant.management.repo.JdbcRoleAdminRepository;
 import com.djzy.assistant.management.repo.JdbcRoleApiAdminRepository;
+import com.djzy.assistant.management.repo.JdbcRoleSkillAdminRepository;
+import com.djzy.assistant.management.repo.RoleAdminRepository;
 import com.djzy.assistant.management.repo.RoleApiAdminRepository;
+import com.djzy.assistant.management.repo.RoleSkillAdminRepository;
 import com.djzy.assistant.common.llm.ApiKeyCipher;
 import com.djzy.assistant.common.persistence.JdbcLlmProviderStore;
 import com.djzy.assistant.common.storage.s3.ObjectStorageConfig;
@@ -78,9 +82,20 @@ public class ManagementConfig {
         return new JdbcRefreshTokenStore(dataSource);
     }
 
+    /** 角色只读清单（{@code sys_role}）：管理端靠它渲染「角色 × 技能 / 角色 × 接口」两张表的主语。 */
+    @Bean
+    public RoleAdminRepository roleAdminRepository(DataSource dataSource) {
+        return new JdbcRoleAdminRepository(dataSource);
+    }
+
     @Bean
     public RoleApiAdminRepository roleApiAdminRepository(DataSource dataSource) {
         return new JdbcRoleApiAdminRepository(dataSource);
+    }
+
+    @Bean
+    public RoleSkillAdminRepository roleSkillAdminRepository(DataSource dataSource) {
+        return new JdbcRoleSkillAdminRepository(dataSource);
     }
 
     @Bean

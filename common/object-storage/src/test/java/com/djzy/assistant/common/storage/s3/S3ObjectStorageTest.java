@@ -8,7 +8,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.djzy.assistant.common.storage.ObjectStorage;
+import java.net.HttpURLConnection;
 import java.net.URI;
+import java.time.Duration;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
@@ -151,5 +153,39 @@ class S3ObjectStorageTest {
         // 故意不填 access-key：装配期就该报错
 
         assertThrows(IllegalStateException.class, () -> S3ObjectStorage.from(properties));
+    }
+
+    @Test
+    void 预签名链接能直接下载到原文() throws Exception {
+        byte[] content = bytes("presigned-download-check");
+        storage.putIfAbsent("presign/check.bin", content);
+
+        String url = storage.presignedGetUrl("presign/check.bin", Duration.ofMinutes(5)).orElseThrow();
+
+        // MinIO / 自建存储只认 path-style：链接里必须出现桶名。
+        // 签成 virtual-hosted 会得到一个解析不了的主机名（bucket.host），看着「有链接」其实打不开。
+        assertTrue(url.contains("/" + BUCKET + "/"), url);
+        assertTrue(url.contains("X-Amz-Signature="), url);
+
+        // 「签出来了」和「能下载」是两件事：真 GET 一次并比对字节。
+        HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
+        conn.setRequestMethod("GET");
+        try {
+            assertEquals(200, conn.getResponseCode());
+            try (var body = conn.getInputStream()) {
+                assertArrayEquals(content, body.readAllBytes());
+            }
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    @Test
+    void 不给有效期就按默认15分钟签() {
+        storage.putIfAbsent("presign/ttl.bin", bytes("ttl"));
+
+        String url = storage.presignedGetUrl("presign/ttl.bin", null).orElseThrow();
+
+        assertTrue(url.contains("X-Amz-Expires=900"), url);
     }
 }

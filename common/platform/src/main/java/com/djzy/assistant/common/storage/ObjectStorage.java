@@ -31,6 +31,21 @@ public interface ObjectStorage {
     /** 删除；对象本来就不存在也算成功（幂等，调用方不必先查后删）。 */
     void delete(String key);
 
+    /**
+     * 短期下载链接（§18.4.5 W2「返回短期有效的下载链接」）。
+     *
+     * <p>默认**不支持**：本机文件系统实现没有「签名 URL」这个概念（对象就在本机目录里，
+     * 给它编一个 HTTP 链接反而是假信息）。只有能签名的实现（S3 兼容）覆写它；
+     * 调用方拿到空值时应如实说明「本次没有可直接下载的链接」，而不是回一个本地路径。
+     *
+     * @param key 业务 key
+     * @param ttl 链接有效期；null / 非正数由实现取默认值
+     * @return 可直接 GET 的临时链接；不支持时为空
+     */
+    default Optional<String> presignedGetUrl(String key, java.time.Duration ttl) {
+        return Optional.empty();
+    }
+
     /** 存储不可用 / 读写失败：调用方按「服务暂不可用」处理，不许吞掉。 */
     final class UnavailableException extends RuntimeException {
 

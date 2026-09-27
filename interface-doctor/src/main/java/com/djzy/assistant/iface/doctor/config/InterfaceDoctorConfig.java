@@ -7,10 +7,13 @@ import com.djzy.assistant.common.security.InMemoryNonceStore;
 import com.djzy.assistant.common.security.NonceStore;
 import com.djzy.assistant.common.security.ServiceVerifier;
 import com.djzy.assistant.common.security.StaticSecretResolver;
+import com.djzy.assistant.common.storage.s3.ObjectStorageConfig;
 import com.djzy.assistant.common.web.LoggingSecurityAuditLog;
 import com.djzy.assistant.common.web.SecurityAuditLog;
 import com.djzy.assistant.common.web.SignatureVerificationFilter;
+import com.djzy.assistant.iface.doctor.repo.ArtifactRegistry;
 import com.djzy.assistant.iface.doctor.repo.DoctorQueryExecutor;
+import com.djzy.assistant.iface.doctor.repo.JdbcArtifactRegistry;
 import com.djzy.assistant.iface.doctor.repo.JdbcDoctorQueryExecutor;
 import com.djzy.assistant.iface.doctor.repo.JdbcMetricDictionary;
 import com.djzy.assistant.iface.doctor.repo.MetricDictionary;
@@ -19,6 +22,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
 import org.springframework.core.Ordered;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -32,6 +36,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * 与注册表之间没有任何东西保证一致。
  */
 @Configuration
+@Import(ObjectStorageConfig.class)
 public class InterfaceDoctorConfig {
 
     /**
@@ -92,5 +97,17 @@ public class InterfaceDoctorConfig {
     @Bean
     public DataAccessAuditWriter dataAccessAuditWriter(DataSource dataSource) {
         return new JdbcDataAccessAuditWriter(dataSource);
+    }
+
+    /**
+     * 工件登记（W3）：导出文件写进对象存储之后，在这里留一条可查的记录。
+     *
+     * <p>对象存储本身由 {@link ObjectStorageConfig} 提供（provider=local 落本机目录，
+     * provider=s3 落 MinIO / 云对象存储）——**接口服务也拿得到它**，因为「导出文件」这件事
+     * 的产出方就是接口服务：谁来写、谁登记，才不会出现「文件在、记录不在」。
+     */
+    @Bean
+    public ArtifactRegistry artifactRegistry(DataSource dataSource) {
+        return new JdbcArtifactRegistry(dataSource);
     }
 }

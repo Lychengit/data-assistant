@@ -18,6 +18,28 @@ export interface RoleApiGrant {
   route: string;
 }
 
+/** 角色（`sys_role`）：授权的**主语**，由 `GET /v1/admin/role` 提供，页面靠它填下拉框而不是让人手敲编码。 */
+export interface RoleSummary {
+  roleCode: string;
+  roleName: string;
+  /** 备注：这个角色大概管什么（只读说明） */
+  remark: string | null;
+}
+
+/** 一条「角色 × 技能」授权（`role_skill`）：回答"这个角色能不能看到并使用这个技能"。 */
+export interface RoleSkillGrant {
+  roleCode: string;
+  /** 技能行 id（`sys_skill.id`） */
+  skillId: number;
+  skillCode: string;
+  skillName: string;
+  /**
+   * 可见性（`role_skill.can_view`）：不可见的技能不进网关下发的能力集，
+   * 也就不会出现在模型的工作区里（§4.7）。
+   */
+  canView: boolean;
+}
+
 export interface ApiRegistration {
   /** 行号（`sys_api.id`）；新增时不填，由服务端分配 */
   id?: number;
@@ -123,6 +145,38 @@ export function revokeRoleApi(roleCode: string, apiId: number): Promise<{ revoke
   });
 }
 
+// ---------- M2 角色清单 ----------
+
+/** 角色只读清单：管理端两张配置表的主语，只有 admin 能读。 */
+export function listRoles(): Promise<RoleSummary[]> {
+  return request("/v1/admin/role");
+}
+
+// ---------- M2 角色 / 技能授权 ----------
+
+/**
+ * 角色已配的技能。给技能是**一件事**，不是两件：这个角色既"看得到这个技能包"，
+ * **也顺带获得该技能绑定并审核通过的接口**（`skill_api`），授权结果与 `role_api` 取并集（§4.6 / ADR-19）。
+ * 没绑进技能的接口（`role_api`）才需要在 `role_api` 里直配。
+ */
+export function listRoleSkill(roleCode: string): Promise<RoleSkillGrant[]> {
+  return request(`/v1/admin/role-skill?${new URLSearchParams({ roleCode })}`);
+}
+
+export function upsertRoleSkill(
+  roleCode: string,
+  skillCode: string,
+  canView = true
+): Promise<RoleSkillGrant> {
+  return request("/v1/admin/role-skill", { method: "PUT", body: { roleCode, skillCode, canView } });
+}
+
+export function revokeRoleSkill(roleCode: string, skillCode: string): Promise<{ revoked: boolean }> {
+  return request(`/v1/admin/role-skill?${new URLSearchParams({ roleCode, skillCode })}`, {
+    method: "DELETE"
+  });
+}
+
 // ---------- M4 接口注册 ----------
 
 export function listApis(): Promise<ApiRegistration[]> {
@@ -177,8 +231,31 @@ export function listPendingSkills(): Promise<SkillVersion[]> {
   return request("/v1/admin/skill/pending");
 }
 
-export function skillDetail(skillCode: string): Promise<{ skill?: SkillSummary; versions: SkillVersion[] }> {
+/** 技能详情：`boundRoutes` 是该技能**已审核**的绑定接口（`skill_api`），形如 `interface-doctor POST /doctor/list`。 */
+export function skillDetail(
+  skillCode: string
+): Promise<{ skill?: SkillSummary; versions: SkillVersion[]; boundRoutes: string[] }> {
   return request(`/v1/admin/skill/${encodeURIComponent(skillCode)}`);
+}
+
+/**
+ * 页面改绑技能绑定的接口（`skill_api`）：**整体替换**，不是增量。
+ *
+ * <p>此前绑定只有技能包 manifest 的 `boundRoutes` 一个来源——换一个接口就要重建包、重算内容哈希、
+ * 重走上传与评审，代价高到没人愿意改。所以管理端把「技能能调哪些接口」也做成可配项：这里提交什么集合，
+ * 库里就是什么集合（提交空数组 = 清空绑定）。
+ *
+ * <p>服务端校验口径与上传时的自动检查逐条一致：接口必须已注册且启用（写接口同样可绑）；
+ * 一处不合法就整条拒绝（不会「合法的先绑上」）。改动写 `config_audit`，重新发布该技能的包会按 manifest 重置。
+ */
+export function updateSkillBoundApis(
+  skillCode: string,
+  boundRoutes: string[]
+): Promise<{ skillCode: string; boundRoutes: string[]; updated: boolean }> {
+  return request(`/v1/admin/skill/${encodeURIComponent(skillCode)}/apis`, {
+    method: "PUT",
+    body: { boundRoutes }
+  });
 }
 
 export function skillChecks(versionId: number): Promise<SkillCheck[]> {

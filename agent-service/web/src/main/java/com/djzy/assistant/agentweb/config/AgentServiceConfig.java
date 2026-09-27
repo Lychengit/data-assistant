@@ -422,9 +422,24 @@ public class AgentServiceConfig {
                 java.nio.file.Path.of(properties.getWorkspaceDir(), "agentscope-workspace"),
                 workspaceStore(properties, dataSource),
                 skillProvisioner(properties, dataSource, objectStorage),
-                sandboxSettings(properties, dataSource));
+                sandboxSettings(properties, dataSource),
+                confirmRegistrar(dataSource));
     }
 
+    /**
+     * 写操作确认凭据的登记口（§19.9）：用户点了确认之后，由 agent-service 往 pending_confirm
+     * 落一条，网关 G3 消费它——两边共用同一张表（JdbcConfirmStore）。
+     *
+     * <p><b>不接会怎样</b>：框架那套确认（REQUIRE_USER_CONFIRM）回答的是「要不要执行这次工具调用」，
+     * 它给的 id 不是网关认的凭据；平台不补一张，写接口（如 /doctor/export/upload）在对话里
+     * **必被**网关 403，审计里 reason = CONFIRM_REQUIRED（2026-09-27 实测）。
+     */
+    private static com.djzy.assistant.runtime.agentscope.ConfirmRegistrar confirmRegistrar(DataSource dataSource) {
+        com.djzy.assistant.common.persistence.JdbcConfirmStore store =
+                new com.djzy.assistant.common.persistence.JdbcConfirmStore(dataSource);
+        return (userId, sessionId, turnId, summary) ->
+                store.register(userId, sessionId, turnId, "tool.write", summary, null);
+    }
     /**
      * 工作区存储（H-04）：agent 的文件空间放哪儿——本机磁盘（返回 {@code null}）还是共用的库。
      *

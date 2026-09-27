@@ -1,0 +1,17 @@
+{
+  "id": "doctor_perf_excel_report",
+  "name": "医生月度绩效报表导出",
+  "version": "1.1.0",
+  "description": "取本月医生名单 → 逐人查本月绩效 → 用固定 py 脚本生成 Excel 工件 → 经 /doctor/export/upload 写入对象存储并回短期下载链接（只读取数；上传是写操作，平台自动弹确认卡，用户确认后才真正执行；上传只给 sandbox_path，字节由宿主代读）",
+  "params": {
+    "month": { "type": "string", "required": true, "description": "统计月份，格式 YYYY-MM；留空由平台按公司口径解析成当前月" },
+    "metric_key": { "type": "string", "required": false, "description": "指标键，必须命中口径字典（默认 outpatient_visits 门诊人次）" }
+  },
+  "script": {
+    "path": "scripts/gen_perf_excel.py",
+    "data": "none",
+    "timeoutSeconds": 120
+  },
+  "resources": ["resources/columns.md"],
+  "exports": ["doctor_id", "doctor_name", "dept_code", "stat_month", "metric_value"]
+}

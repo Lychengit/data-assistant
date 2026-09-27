@@ -100,4 +100,17 @@ class LocalFileObjectStorageTest {
         assertTrue(Files.isDirectory(nested));
         assertTrue(storage.putIfAbsent("deep/key.bin", bytes("v")));
     }
+
+    /**
+     * 端口契约：给不出临时链接时返回 {@code empty}——不抛异常，也不编一个指向本机路径的假链接
+     * （接口服务据此如实回 null，而不是给调用方一个打不开的「下载地址」）。
+     */
+    @Test
+    void 本地文件系统给不出签名链接() throws IOException {
+        ObjectStorage storage = new LocalFileObjectStorage(新工作目录("presign"));
+        storage.putIfAbsent("a/b.bin", bytes("x"));
+
+        assertEquals(Optional.empty(), storage.presignedGetUrl("a/b.bin", java.time.Duration.ofMinutes(5)));
+        assertEquals(Optional.empty(), storage.presignedGetUrl("nothing/here.bin", null));
+    }
 }

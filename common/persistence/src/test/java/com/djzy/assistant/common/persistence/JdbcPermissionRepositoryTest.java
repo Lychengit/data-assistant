@@ -21,11 +21,13 @@ class JdbcPermissionRepositoryTest {
     private static final long EXPORT = 102L;
 
     private AuthorizationService authorization;
+    /** 本用例这一份库（{@link PersistenceTestSupport#dataSource()} 每次调用都是新库，用例内加数据必须走这个） */
+    private JdbcTemplate jdbc;
 
     @BeforeEach
     void setUp() {
         DataSource dataSource = PersistenceTestSupport.dataSource();
-        JdbcTemplate jdbc = PersistenceTestSupport.template(dataSource);
+        jdbc = PersistenceTestSupport.template(dataSource);
         seed(jdbc);
         authorization = new AuthorizationService(new JdbcPermissionRepository(jdbc));
     }
@@ -56,6 +58,23 @@ class JdbcPermissionRepositoryTest {
     @Test
     void skillDerivedApisRequireApproval() {
         assertEquals(Set.of(PERF), authorization.runtimeApis("perf_report"));
+    }
+
+    /**
+     * 把「只配技能」这件事单独隔离出来：角色一条 {@code role_api} 都没有，配额里只有一条 {@code role_skill}。
+     * 期望 {@code apiSet} 里出现的是**技能自己声明并审核通过的接口**（§4.6 并集，ADR-19）——技能是独立授权单元，
+     * 配了技能就顺带拿到了接口，不需要再逐个直配一遍。同一条 skill_api 里 approved=FALSE 的那个仍然不进。
+     */
+    @Test
+    void skillAloneBringsItsApprovedApisIntoTheUnion() {
+        jdbc.update("INSERT INTO sys_user (id, username, status) VALUES (4,'dave','active')");
+        jdbc.update("INSERT INTO sys_role (id, role_code) VALUES (13,'dept_c')");
+        jdbc.update("INSERT INTO sys_user_role (user_id, role_id) VALUES (4,13)");
+        jdbc.update("INSERT INTO role_skill (role_id, skill_id, can_view) VALUES (13,20,TRUE)");
+
+        assertEquals(Set.of("perf_report"), authorization.viewableSkills("dave"));
+        // 100 是 skill_api 里 approved=TRUE 的那条（顺带授出）；102 也是技能声明的，但审核没过 → 不算
+        assertEquals(Set.of(PERF), authorization.apiSet("dave"));
     }
 
     @Test

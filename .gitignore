@@ -11,3 +11,8 @@ deploy/local-windows/.smoke/
 
 # 一键启动脚本的运行痕迹（服务日志 / 事件日志 / 工作区 / 本机对象存储），不入库
 deploy/local-windows/.local/
+# 沙箱宿主代理每次执行的痕迹（输入工件 / 产物 / 结果 JSON），不入库
+tools/sandbox-runner/.run/
+
+# 不设 OBJECT_STORAGE_ROOT_DIR 直接单跑接口服务时，provider=local 的落盘位置
+interface-doctor/data/

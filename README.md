@@ -18,7 +18,7 @@
 | `management-service` | §18.4.6 / §19.4 / §20.4 / §20.7 | 管理后台：M1 登录（JWT ≤15min + 一次性 refresh）、M2 角色/接口授权、M3 技能包、M4 接口注册、M5 口径字典、M6 审计/回放/监控。平台元数据与审计读走**独立只读出口**，不套范围过滤 |
 | `management-service`（模型供应商） | ADR-14 / §20.1.6 / §20.7 | 模型供应商配置：`sys_llm_provider` 存**密文**（AES-GCM，KEK 由环境注入），页面只回显 `keyHint`；同一时刻至多一个生效（服务层切换 + 部分唯一索引兜底）；每次变更写 `config_audit` |
 | `web/`（前端） | §14-11 / §18.4.6 | Vue 3 + Vite + TS 单页：登录页、对话页（步骤卡/文件卡/确认按钮/澄清选项）、管理页 M2–M6。**前端只做展示**，判定仍在网关 |
-| `deploy/` | §13 / §16 / §20.8 | `migrations/`（Flyway V1–V17）、**`local-windows/`（本机原生安装：MinIO + 建库脚本，见其 README）**、`docker-compose.yml`（CI / 生产参考）、OTel / Prometheus 配置 |
+| `deploy/` | §13 / §16 / §20.8 | `migrations/`（Flyway V1–V18）、**`local-windows/`（本机原生安装：MinIO + 建库脚本，见其 README）**、`docker-compose.yml`（CI / 生产参考）、OTel / Prometheus 配置 |
 
 ## 硬约束（改代码前先读）
 - **判定单点**：只有网关推导身份；接口服务验签后**直接使用**网关下发的 `userId`，不重解析身份、不查权限库、
@@ -133,7 +133,7 @@ cd deploy\local-windows
 
 ```powershell
 cd deploy
-docker compose up -d postgres redis minio otel-collector prometheus   # 首次启动会执行 migrations/ 下的 V1–V17
+docker compose up -d postgres redis minio otel-collector prometheus   # 首次启动会执行 migrations/ 下的 V1–V18
 
 # 管理后台（M1/M2/M3/M4/M5/M6）
 $env:MANAGEMENT_JWT_SECRET = "<与网关 GATEWAY_JWT_SECRET 相同的登录令牌密钥>"
@@ -306,8 +306,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File demo/probe.ps1     # 期望 
 
 ```text
 POST   /v1/auth/login | /v1/auth/refresh | /v1/auth/logout        GET /v1/auth/me
-GET    /v1/admin/role-api?roleCode=          PUT /v1/admin/role-api        DELETE /v1/admin/role-api
+GET    /v1/admin/role                        # 角色只读清单（管理端下拉框用）
+GET    /v1/admin/role-skill?roleCode=        PUT /v1/admin/role-skill      DELETE /v1/admin/role-skill   # 角色 × 技能（配了就顺带拿到技能绑定的接口）
+GET    /v1/admin/role-api?roleCode=          PUT /v1/admin/role-api        DELETE /v1/admin/role-api     # 角色 × 接口直配（只补没绑进技能的：写接口也能绑技能了，直配留给"只授给这个角色"的）
 GET    /v1/admin/skill | /pending | /{skillCode} | /versions/{vid}/checks
+PUT    /v1/admin/skill/{skillCode}/apis            # 技能 × 接口改绑（整体替换 + 校验 + 审计；重发该技能按包内 manifest 重置）
 POST   /v1/admin/skill/upload                POST /v1/admin/skill/versions/{vid}/review
 GET    /v1/admin/api | /v1/admin/api/{id}  PUT /v1/admin/api            PUT /v1/admin/api/{id}/enabled   DELETE /v1/admin/api/{id}
 GET    /v1/admin/metric | /{key} | /unit-convert   PUT /v1/admin/metric | /unit-convert
@@ -331,7 +334,7 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
 - §4.5 / §11.3 统一错误措辞（`UnifiedErrors`）
 - §20.4 I6 数据访问审计（`data_access_audit`，直写 PG）
 - §20.7 `config_audit` 表；§20.5 审计表主键带 `created_at`（为月分区留口子）
-- §18.4.6 M1/M2/M4/M5/M6：登录 + 角色/接口授权 + 接口注册 + 口径字典 + 审计回放监控（每次改动/查询都留痕）
+- §18.4.6 M1/M2/M4/M5/M6：登录 + 角色授权（技能 / 接口两张表，`role_skill` / `role_api`）+ 接口注册 + 口径字典 + 审计回放监控（每次改动/查询都留痕）
 - §19.4 JWT ≤15 分钟 + 一次性 refresh token（哈希存库、轮换消费 + 撤销）；令牌不进 URL/日志
 - §6.1 口径字典规格字段（别名/定义/公式/时间口径/`scale`/`timezone`）+ `unit_convert` 换算表；派生算子与算式复算**共用一份白名单**
 - §20.4 审计读独立只读出口（`audit_read_audit` 记录谁在何时查了审计）+ requestId 回放与「agent 记了、接口服务没记」不一致告警
@@ -373,7 +376,7 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
   两条代价（记在 L-22）：后到的那一轮要等、等不到就失败；PG 这条路整轮占一条连接，所以同时在跑脚本的用户数不能超过连接池。详见 DR-51 / DR-51b 与 `doc/refactor/TASKS.md` §6「H-11 落地说明」。
 - §19.5 / §19.14 进程重启或换 pod 后，运行时句柄没了也能从 PG 快照把会话接回来续跑（`runtime.resume`）；快照缺失一律 409，**不凭空当作用户已确认**
 - §6.3 / §18.5.5 数字台账与算式复算（`common/platform/ledger`）
-- §18.4.6 M3 技能包管理：上传（内容哈希寻址，同内容不产生第二版）→ 自动检查（告警不阻断，阻断项才拦）→ 人工评审（只评最新版）→ 发布成不可变版本；绑定只读接口的技能自动可用，绑定写接口的自动 `rejected` 并记 `reviewer=system`；停用保留包但吊销绑定
+- §18.4.6 M3 技能包管理：上传（内容哈希寻址，同内容不产生第二版）→ 自动检查（告警不阻断，阻断项才拦）→ 人工评审（只评最新版）→ 发布成不可变版本；绑定接口按是否注册 + 是否启用判定（**写接口不再被拦**，2026-09-27 取消旧 ADR-19 ②，见下）；停用保留包但吊销绑定。绑定接口不是只能来自包内 `boundRoutes`：技能包页可直接改绑（`PUT /v1/admin/skill/{skillCode}/apis`，整体替换、与上传同一套校验、留 `config_audit`；空数组即清空）；重新发布时包内写了 `boundRoutes` 按它重置、**没写则保留页面那份**（显式 `[]` 才清空）。manifest 必填项 2026-09-27 从十项降到三项（`id / name / description`，脚本类加 `script`）：`version` 不写按内容自动生成、`kind` 不写按包内有没有 `script` 块推、绑定接口改在页面勾（§18.5.2）
 - §18.4.1 / §19.4 agent-service Web 层：会话/轮次 API + **一次性入场券**（`ticket` 核销即失效，`AGENT_TICKET_STORE=redis` 支持跨实例）+ `GET /v1/agent/chat/stream`（SSE，认 `Last-Event-ID`，`afterSeq` 优先）+ HITL 确认回执 + 轮次限速（`turns-per-minute`）
 - §12.2 事件表 → 前端投影：步骤卡 / 技能卡 / 工具卡 / 文件卡 / 确认按钮 / 澄清选项 / 流式文本 / 最终答案，**确认与澄清渲染在对话气泡内，不做弹窗**（§12.1）
 - §9.3 / §2.3 用户轮次配额：`TurnLimiter` 端口 + 两套实现——`TurnRateLimiter`（进程内滑动窗口，只给单副本骨架用）
@@ -462,6 +465,35 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
   改路径等于新登记一条，否则旧的会留在注册表里两条并存）；角色授权从"选接口编码 + 写数据范围 JSON"
   改成"从注册表下拉选接口"（`apiId`），范围那一栏整块删掉
 
+- 接口服务第三个接口 `POST /doctor/export/upload`（W1–W3 写操作，`V18` 注册 `sys_api` kind=write 并把 `role_api` 授给 admin）
+  与对象存储**预签名下载链接**：上传走内容寻址（`exports/<sha256>/<文件名>`，同内容不产生第二个对象），
+  文件名清洗（去路径、去前导点）+ 扩展名白名单 + 20MB 上限；返回 `artifact_id / size_bytes / content_sha256 /
+  download_url`。链接由 `ObjectStorage.presignedGetUrl(key, ttl)` 签发（S3 实现用 `S3Presigner`，path-style 与主
+  客户端同源；`provider=local` 时端口默认实现返回空——本地文件系统没有签名 URL 这个概念）。因此接口服务也必须
+  拿到 `OBJECT_STORAGE_*`：本机 `start-local.ps1 -ObjectStorage s3` 已一并发给三个服务（原先漏了接口服务，
+  表现是「上传成功但下载地址为空」）。
+- §18.4.4 / §18.5.3 **宿主代理搬运产物**（`tools/sandbox-runner/`）：沙箱 `network("none")` + 非 root + 只读挂载
+  + `cap-drop ALL`（镜像 `doctor-assistant/sandbox-python:3.12`），脚本只读 `/in/input.json`、只写 `/out/*.xlsx`；
+  取数与上传都由**容器外的宿主代理**持令牌经网关代调。上传**不带 `skillCode`**，网关因此按「角色直配接口」判定；
+  这正是「沙箱永远拿不到凭据」那条边界。（技能现在也能绑写接口了——2026-09-27 取消旧 ADR-19 ② 的绑定禁令；
+  宿主代理这条路保持不变，绑不绑都不影响它。）
+- §18.6.2 端到端用例落地：技能 `doctor_perf_excel_report`（源 `samples/skills/`、包 `samples/skill-packages/`）
+  = 当月医生名单（`/doctor/list`）→ 逐人绩效（`/doctor/performance`，循环按网关 5 QPS 节拍让行）→ 沙箱内
+  `scripts/gen_perf_excel.py`（openpyxl）生成 Excel（**本月无数据如实留空、不补 0**，另附「口径说明」页）→
+  宿主代理上传 → 下载链接；`§19.9` 的一次性 `confirmId` 由网关消费，`role_skill(admin)` 赋予执行权。
+- 管理端一张页管住「角色 × 技能 / 角色 × 接口」（`/admin/role-grant`，旧地址 `/admin/role-api` 留重定向）：
+  角色下拉由新增的只读端点 `GET /v1/admin/role` 提供——此前没有任何端点能列出角色，配置只能靠背编码，
+  填错的表现不是报错而是「这个角色一条授权都没有」，看着像没配过、实际是查错了人。技能与接口各一张勾选表，
+  勾选即落库（`role_skill` / `role_api`，零缓存、下一轮对话就生效），写失败时勾自动弹回，
+  不留「界面勾着、库里没有」的中间态。页面上把并集口径（§4.6 / ADR-19）直说：技能是独立授权单元，
+  配了就既"这一轮看得到这个技能包"、**也顺带拿到它绑定并评审通过的接口**，不必再逐个接口授一遍；
+  技能表因此多一列「自带接口」，接口表多一列「实际来源」（技能带的 / 仅直配 / 两者都有），
+  没勾但已被技能覆盖的行也照实标出来。「接口授权」只用补**没绑进技能**的那些
+  （写接口也能绑进技能了，2026-09-27 取消旧 ADR-19 ②；直配留给"只授给某个角色"的接口）。
+- 技能 × 接口也能在**技能包页**改（`/admin/skill` → 已登记技能 → 「关联接口」）：勾选即整体替换 `skill_api`，
+  写接口行同样可勾（2026-09-27 取消旧 ADR-19 ② 的绑定禁令），未注册/已停用的接口挡在提交前；
+  改动写 `config_audit`（前后两个完整集合，能看出这次到底加了哪条、删了哪条）。此前这张表只有包内 manifest 一个来源，
+  改一条绑定要重打包 + 重走评审，等于逼着人手工改 zip。
 ## 尚未实现（按规格顺序）
 
 1. `skill-execution-service`（S0–S7，骨架期内嵌 agent-service，§19.11）+ `sandbox-runner`（`network("none")`）
@@ -475,10 +507,12 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
 7. `runtime-agentscope` 的**完整 TCK**（需要确定性模型桩或真实端点）。仓库默认配置仍是 `noop` + `tck-passed-runtimes=noop`——
    那是准入闸门（§18.11.6），不是「没做完」；本机为了让对话真的走模型，是用环境变量把 `agentscope` 显式加进准入选单的
    （见「接入大模型」一节），属于刻意的本地覆盖。模型侧接线已完成并有单测覆盖（解析 / 切换 / 解密 / 无配置报错 / 能力面基线）
-8. Flyway 接入：迁移目前由部署脚本按序 apply（`deploy/migrations/V1–V17`）
+8. Flyway 接入：迁移目前由部署脚本按序 apply（`deploy/migrations/V1–V18`）
 9. 模型偶发英文过程旁白：DeepSeek 在**调工具前**会先说一句英文（如 I will query last month outpatient visits），
-   这句走 `TEXT_BLOCK`，既进步骤卡、也随 `token` 流进答案气泡。提示词已写明「全程中文、不写过程旁白」，
-   实测仍未完全压住（纯对话轮没有该现象，只在调工具的轮次出现）。更稳的做法在投影层而不是提示词：
+   这句走 `TEXT_BLOCK`，既进步骤卡、也随 `token` 流进答案气泡。**用户 2026-09-27 明确不做「命中英文旁白就不下发」的硬拦截**，
+   只在提示词里写死（`SystemPromptComposer` 的中文要求 + 每轮收口指令）；投影层保留一处保守识别
+   （无汉字 + ≥12 个拉丁字母 + ≥3 个多字母词）只打 WARN、给步骤卡标 `lang=en`，不改写下发。
+   更稳的做法在投影层而不是提示词：
    把「首次工具调用之前的正文」归到步骤卡、不进答案气泡（§12.2 的 `step` 语义）
 10. **数据可见范围过滤**（§19.1 的落地部分）：`role_api.scope` 已经删了，范围过滤目前是接口服务里的
    `TODO`（`DoctorPerformanceApi` 里有位置注释）——**现在各账号看到的数据相同**，别把「alice 也看到财务科」
@@ -487,7 +521,7 @@ GET    /v1/admin/audit/data-access | permission | config | reads | trace | overv
 
 ## 数据库迁移：已在本地 PostgreSQL 实测
 
-`deploy/migrations/` 下 **V1–V17** 已在本地 PostgreSQL 18 空库上全量跑通（旧文档里「有 Docker 后再验证」这条已完成）：
+`deploy/migrations/` 下 **V1–V18** 已在本地 PostgreSQL 18 空库上全量跑通（旧文档里「有 Docker 后再验证」这条已完成）：
 
 ```powershell
 # 建库（口令按本地实际改）

@@ -25,6 +25,15 @@ public final class UnifiedErrors {
     /** 确认无法唯一绑定（§19.9）。 */
     public static final String CONFIRM_NOT_UNIQUE = "无法确定您确认的是哪一项操作，请重新选择";
 
+    /**
+     * 会话里还有一张**没答复**的写操作确认卡（§19.9）。
+     *
+     * <p>为什么必须单独一句话：框架对「有待批准的工具调用、这一轮却没给确认结果」是直接抛异常的，
+     * 归一化之后就变成「服务暂不可用，请稍后再试」——用户唯一能做的就是重试，而重试永远不会好。
+     * 实际原因是**用户自己有一步没做**（点确认 / 点取消），所以把这一步说出来（2026-09-27 实测）。
+     */
+    public static final String CONFIRM_PENDING = com.djzy.assistant.spi.PendingConfirmationException.DEFAULT_USER_MESSAGE;
+
     /** 限流（§9.3）。 */
     public static final String RATE_LIMITED = "请求过于频繁，请稍后再试";
 

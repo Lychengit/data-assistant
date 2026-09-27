@@ -18,11 +18,13 @@ export const router = createRouter({
     },
     { path: "/", name: "chat", component: () => import("@/views/ChatView.vue"), meta: { title: "对话" } },
     {
-      path: "/admin/role-api",
-      name: "admin-role-api",
-      component: () => import("@/views/admin/RoleApiView.vue"),
-      meta: { admin: true, title: "角色授权（M2）" }
+      path: "/admin/role-grant",
+      name: "admin-role-grant",
+      component: () => import("@/views/admin/RoleGrantView.vue"),
+      meta: { admin: true, title: "角色授权（技能 / 接口）" }
     },
+    // 老地址留个重定向：这一页原先是「角色 × 接口」，加技能后换了名字，别让书签变成 404
+    { path: "/admin/role-api", redirect: "/admin/role-grant" },
     {
       path: "/admin/skill",
       name: "admin-skill",

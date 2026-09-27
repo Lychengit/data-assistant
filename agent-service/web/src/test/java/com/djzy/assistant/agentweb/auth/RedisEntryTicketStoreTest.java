@@ -52,16 +52,30 @@ class RedisEntryTicketStoreTest {
         String hash = "hash-" + java.util.UUID.randomUUID();
         EntryTicket ticket = new EntryTicket("alice", "s1", "t1", Instant.now().plusSeconds(60));
 
-        store.save(hash, ticket, 60);
+        assertThat(store.saveIfAbsent(hash, ticket, 60)).isTrue();
 
         assertThat(store.consume(hash, Instant.now())).contains(ticket);
         assertThat(store.consume(hash, Instant.now())).isEmpty();
     }
 
     @Test
+    void 同一个键存第二次必须失败且不覆盖第一张() {
+        String hash = "hash-" + java.util.UUID.randomUUID();
+        Instant expiresAt = Instant.now().plusSeconds(60);
+        EntryTicket alice = new EntryTicket("alice", "s1", "t1", expiresAt);
+
+        assertThat(store.saveIfAbsent(hash, alice, 60)).isTrue();
+        // 撞号：SET NX 必须拒掉第二次写入。若它覆盖成功，alice 的券就会查出 bob 的身份（串号）
+        assertThat(store.saveIfAbsent(hash, new EntryTicket("bob", "s2", "t2", expiresAt), 60))
+                .isFalse();
+
+        assertThat(store.consume(hash, Instant.now())).contains(alice);
+    }
+
+    @Test
     void 过期的券等于没有() {
         String hash = "hash-" + java.util.UUID.randomUUID();
-        store.save(hash, new EntryTicket("alice", "s1", "t1", Instant.now().minusSeconds(1)), 60);
+        store.saveIfAbsent(hash, new EntryTicket("alice", "s1", "t1", Instant.now().minusSeconds(1)), 60);
 
         assertThat(store.consume(hash, Instant.now())).isEmpty();
     }
@@ -69,7 +83,7 @@ class RedisEntryTicketStoreTest {
     @Test
     void 存储掉线时拒绝放行() {
         String hash = "hash-" + java.util.UUID.randomUUID();
-        store.save(hash, new EntryTicket("alice", "s1", "t1", Instant.now().plusSeconds(60)), 60);
+        store.saveIfAbsent(hash, new EntryTicket("alice", "s1", "t1", Instant.now().plusSeconds(60)), 60);
         factory.destroy();
 
         assertThatThrownBy(() -> store.consume(hash, Instant.now()))

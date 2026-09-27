@@ -204,12 +204,12 @@ public final class JdbcSkillPackageRepository implements SkillPackageRepository 
             }
             List<SkillPackageInspector.ApiMetadata> rows = jdbc.query(
                     """
-                    SELECT kind, enabled, result_schema
+                    SELECT enabled, result_schema
                       FROM sys_api
                      WHERE service = ? AND upper(http_method) = ? AND http_path = ?
                     """,
                     (rs, rowNum) -> new SkillPackageInspector.ApiMetadata(
-                            route.format(), rs.getString("kind"), rs.getBoolean("enabled"), parseResultColumns(rs.getString("result_schema"))),
+                            route.format(), rs.getBoolean("enabled"), parseResultColumns(rs.getString("result_schema"))),
                     route.service(),
                     route.httpMethod(),
                     route.httpPath());
@@ -235,8 +235,29 @@ public final class JdbcSkillPackageRepository implements SkillPackageRepository 
         } else {
             jdbc.update(insertSkillSql, skillCode, name, description, paramSchemaJson, now, now);
         }
+        if (routes == null) {
+            // 包内没写 boundRoutes：绑定不归这个包管，库里那份（页面「绑定接口」配的）一个都别动。
+            // 「没写」与「写了空数组」必须走两条路，否则重新发布一次就会静默清空管理员的配置。
+            return;
+        }
         Long skillId = jdbc.queryForObject("SELECT id FROM sys_skill WHERE skill_code = ?", Long.class, skillCode);
         // 审核对象是最新包，因此这里先撤回该技能所有接口绑定，再按本包重新授予（不留上一次的残留绑定）。
+        writeBindings(skillId, routes, publishedBy, now);
+    }
+
+    /**
+     * 页面改绑（管理端「技能包 M3 → 关联接口」）：整体替换该技能的绑定集合。
+     *
+     * <p>与 {@link #publishSkill} 共用 {@link #writeBindings}，就是为了保证两条写路径不会长出两套口径
+     * （一个标 {@code approved} 一个不标、一个去重一个不去重，这类分歧只会在权限判定上爆出来）。
+     */
+    @Override
+    public void replaceBoundRoutes(String skillCode, List<String> routes, String approvedBy, Instant approvedAt) {
+        writeBindings(requireSkillId(skillCode), routes, approvedBy, Timestamp.from(approvedAt));
+    }
+
+    /** 绑定集合的唯一写法：先删后插（{@code approved=TRUE} 表示这次写入就是审核结论）。 */
+    private void writeBindings(long skillId, List<String> routes, String approvedBy, Timestamp now) {
         jdbc.update("DELETE FROM skill_api WHERE skill_id = ?", skillId);
         for (String declared : routes) {
             ApiRoute route = ApiRoute.parse(declared);
@@ -250,11 +271,34 @@ public final class JdbcSkillPackageRepository implements SkillPackageRepository 
                     "INSERT INTO skill_api (skill_id, api_id, approved, approved_by, approved_at) VALUES (?, ?, TRUE, ?, ?)",
                     skillId,
                     apiId,
-                    publishedBy,
+                    approvedBy,
                     now);
         }
     }
 
+    /** 拿技能行 id；不存在直接报错（不静默写 0 行，否则「改绑成功」但库里什么都没变）。 */
+    private long requireSkillId(String skillCode) {
+        Long id = jdbc.queryForObject("SELECT id FROM sys_skill WHERE skill_code = ?", Long.class, skillCode);
+        if (id == null) {
+            throw new IllegalArgumentException("技能不存在：" + skillCode);
+        }
+        return id;
+    }
+
+    @Override
+    public List<String> listBoundRoutes(String skillCode) {
+        return jdbc.queryForList(
+                """
+                SELECT a.service || ' ' || upper(a.http_method) || ' ' || a.http_path
+                  FROM skill_api sa
+                  JOIN sys_api a ON a.id = sa.api_id
+                 WHERE sa.approved = TRUE
+                   AND sa.skill_id = (SELECT id FROM sys_skill WHERE skill_code = ?)
+                 ORDER BY a.id
+                """,
+                String.class,
+                skillCode);
+    }
     @Override
     public boolean setSkillEnabled(String skillCode, boolean enabled) {
         int updated = jdbc.update(

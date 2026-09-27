@@ -14,9 +14,15 @@ public final class InMemoryEntryTicketStore implements EntryTicketStore {
 
     private final ConcurrentMap<String, EntryTicket> tickets = new ConcurrentHashMap<>();
 
+    /**
+     * 用 {@code putIfAbsent} 占坑：键上已经有值就原样留着，绝不覆盖（券就是身份，覆盖 = 串号）。
+     *
+     * <p>这里不按 TTL 清理：内存实现只服务单实例骨架期，用完即弃；多副本必须换
+     * {@link RedisEntryTicketStore}（它用 {@code SET NX PX}，TTL 由 Redis 自己管）。
+     */
     @Override
-    public void save(String ticketHash, EntryTicket ticket, long ttlSeconds) {
-        tickets.put(ticketHash, ticket);
+    public boolean saveIfAbsent(String ticketHash, EntryTicket ticket, long ttlSeconds) {
+        return tickets.putIfAbsent(ticketHash, ticket) == null;
     }
 
     @Override

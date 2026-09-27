@@ -24,6 +24,11 @@
       <groupId>com.djzy.assistant</groupId>
       <artifactId>common-persistence</artifactId>
     </dependency>
+    <!-- W2/W3：导出文件写对象存储（provider=local 本机目录 / s3 MinIO 与云对象存储）。 -->
+    <dependency>
+      <groupId>com.djzy.assistant</groupId>
+      <artifactId>common-object-storage</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>

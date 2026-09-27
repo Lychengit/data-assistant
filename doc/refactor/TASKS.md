@@ -77,6 +77,9 @@
 | DR-52 | **H-13 形态（2026-09-26 落地）**：本地事件日志不再只增不减，按两个条件收拾 —— ①**裁剪**：只删**开头**那段「已确认投递 **且** 早于保留窗口（默认 **7 天**，agent-service.event-log-retention）」的记录，遇到第一条「不能删」的立刻停（只裁前缀，裁中间会让字节位点失去意义）；②**滚动**：活动文件超过单文件上限（默认 **256 MB**，agent-service.event-log-max-bytes）时，把「还没确认投递的尾巴」**复制**进新文件、旧文件带时间戳改名留档（agent-{instanceId}-{yyyyMMddHHmmss}.jsonl），位点归零；留档到点整份删。三个动作由**每个实例自己的**调度器按分钟跑完（maintenance = 落盘 → 裁剪 → 滚动 → 清理留档，agent-service.event-log-maintenance-interval-ms 默认 1 分钟）。**未确认投递的记录一条都不删、也不滚** | ①日志是审计的唯一事实源（ADR-28），但「唯一事实源」不等于「无限长」：一个实例连着跑，那个文件会一直长到把磁盘占满，撑爆之后连追溯都做不了；而原来的实现里裁剪这条逻辑**从来没被调用过**、判据又写错（一条也裁不掉）、单文件上限配了却从未使用；②三条规矩都绕着同一件事——**没送进队列的绝不能丢**：裁剪只裁前缀；滚动时未确认的尾巴复制进新文件再留档旧文件，于是那几条在磁盘上**短暂存在两份**（靠消费端按 event_id 幂等兜住，不是新 bug）；**一条都没确认时干脆不滚**（滚了只是把文件整个复制一遍，还会每分钟再造一份）；③每个实例只碰自己的文件，所以这一整套**不需要分布式锁** |
 | DR-53 | **会话列表改读「会话档案」（H-13）**：列表要的三个数（**标题** = 用户问的第一句话截断、**提问条数**、**最后提问时刻**）在**提问的那一刻**写进 platform_session（PlatformSessionStore#recordQuestion，由 ChatService 在跑模型之前顺手写、失败只 warn 不影响这一轮）；SessionCatalog#list 只读档案，**一次对话正文都不读**。历史回放（/turns）照旧读框架的 AgentState | 原来打开一次列表要把每个会话的整段对话读出来，只为了算这三个数——一个用户几百个会话就是几百次大对象读，而这些数在提问那一刻平台手上就有全部事实（标题就是用户刚打的那句话）。口径必须写清「**档案是索引、正文是真相**」：档案允许落后（例如绕过平台直接往状态库塞过对话），落后可自愈（再问一句就跟上），而历史回放一个字都不来自档案——升级前的老会话没有档案，列表照旧显示它，只是标题为「未命名会话」、条数为 0 |
 | DR-54 | **H-02 裁定（2026-09-26）：逐字回放不做** —— token 级增量只在流里走、不落库；真正该补的不是逐字内容，而是**计时 + 用量**，另开 **H-15**（首字延迟 / 总耗时 / token 用量 / 成本） | ①同类产品就这么做：Codex 自己的会话记录（本机 37 个 rollout 文件逐字段扫过）只有条目级 `message` / `reasoning` / `function_call` / `function_call_output` + 每条的 `started_at`/`completed_at` + 一份 `token_usage_record`（数字，不是 token 内容），**名字里带 delta 的字段一个都没有**，连推理都只存摘要 + 加密块（加密块给模型续跑用，不是给人看）；②框架也这么划线：AgentScope 自家 `agentscope-service` 把 `EVENT_START` / `EVENT_DELTA` 标成 **Stream-only (never persisted)**，被持久化的只有 `agent.message`/`agent.thinking`/`agent.tool_use`/`agent.tool_result`/span/会话状态，与我们事实表那几类一一对应，而框架的 `TranscriptMiddleware` 也是每轮结束追加 `AgentState.context` 的**消息**；③需求上不需要：审计要的是口径/表/过滤/结果，评估要的是最终答案，排障要的那点在本地 append-only 日志里就有（H-13 之后 7 天窗口内确实存着逐字事件）；④代价：1 万轮/天 × 800 delta ≈ **800 万行/天**（块级约 10 万行/天，差 80 倍），且逐字是高频小写入，正好把 H-13 的滚动与裁剪推回去 |
+| DR-55 | **M3 技能包 manifest 降门槛（2026-09-27，用户点名「这个 json 给不懂编码的都不会玩」）**：必填项从十项降到 **`id / name / description`**（脚本类加 `script`）——`version` 不写按**包内容哈希**自动生成（`0.0-<内容前 8 位>`：内容寻址本来就保证「同一内容只有一个版本行」，跟着它走不可能撞唯一键）、`kind` 不写按包内**有没有 `script` 块**推、`boundRoutes` **不写＝绑定不归这个包管**（发布时保留 `skill_api` 里那份，显式 `[]` 才清空）、`params / resources / status` 只影响生成说明的展示（`status` 全库检索**没有任何读方**）。没绑接口时 `EXPORT_COLUMNS_WHITELISTED` 不做判定（没有返回字段契约可作上界）。 | 写 manifest 的人常常不是写代码的人，「少写一个字段就传不上去」把上传变成对着报错改 JSON 的猜谜。`boundRoutes` 必填还会造成更坏的事：包内那份绑定是**第二份真相**，页面改绑之后一次重新发布就会把它抹掉——接口清单的权威因此收敛到 `skill_api` 一处 |
+| DR-56 | **M3 上传报 500 的根因（2026-09-27 实测修复）**：`manifest.json` 被裹在一层目录里时上传直接 500「服务暂不可用」——「右键 → 压缩文件夹」压出来的包**必然**套一层目录名（`my_skill/manifest.json`），而 `PackageReader` 只认最外层的清单，抛出的 `InvalidPackageException` 又被 `ApiErrorHandler` 的兜底当成内部错误。修法两处：① **认包根**——包内只有一处 / 多处清单时取最浅的那个，把它所在的那层目录剥掉（不在这层目录下的条目原样留着），于是「怎么压都能传」；② **归位到 400**——`InvalidPackageException`（`MANIFEST_MISSING` / `UNREADABLE_PACKAGE` / `UNSAFE_ENTRY_PATH` …）与漏传 `file` 字段都返回 **400 + 具体中文原因**，不再套「服务暂不可用」 | ①这是**最常见的打包方式**：把「少一层目录」当成使用者的错误，等于给每个不懂 zip 结构的人设一道坎；②包不合法是「你传的文件不对」，用户唯一的出路是改包重传，一句统一措辞只换来「重试一个永远不会好的请求」；③剥前缀在**公共模块**里做，管理端上传与 agent 侧下发工作区共用同一份解包逻辑，不会一份认一层目录、另一份不认 |
+| DR-57 | **对话里"技能脚本找不到"的根因（2026-09-27 实测修复）**：症状是同一句话（`导出本月医生绩效表`）有时跑完、有时模型在容器里 `ls /workspace/skills/doctor_perf_excel_report/scripts/` 得到 `No such file or directory`，然后反复换路径找脚本、整轮像卡住。根因是**技能投影被框架按内容哈希跳过了**：容器一轮一个（`SandboxManager#release` → `docker stop` + `docker rm`），而重建后的空容器是否重新投影，看的是持久化沙箱状态里记着的 `workspaceProjectionHash`（`AbstractBaseSandbox#applyWorkspaceProjectionIfChanged`）——内容没变、哈希不变，文件就一个都灌不进去。平台原来只在**每轮开头**清状态（`resetSandboxStateIfContainerGone`），而框架是在**本轮结束时**才写回状态（`releaseForCall`），拿下一轮的准备去清本轮结束的写回，时机天生对不上。修法：**一轮结束（流终止）就把该用户的沙箱状态置成 tombstone**（`AgentscopeRuntimeAdapter#forgetSandboxState`，挂在 `doFinally` 上），于是下一个容器必定走「干净创建」那条路（Priority 4 → Branch D → 投影必做） | ①不修框架改平台，因为这条路的**权威方在框架**：投影哈希存在沙箱状态里，平台唯一能做的就是"别把上一轮那条状态留给下一轮"；②必须在**轮末**清而不是轮初清：同一用户的甲轮还没释放、乙轮已经在准备，甲轮随后写回的状态会把乙轮刚清掉的那条复活——真机就是这么丢的（19:47 那次）；③代价如实记：跨轮"续用同一台容器"（`Branch A`，工作区 preserved）这条路没了。它本来也走不到——容器每轮结束就被删掉；跨轮真正要活着的是**产物**，那是宿主机工件目录的 bind mount（`SandboxArtifactMount`），与沙箱状态无关；④证据：`SandboxStateReuseTest` 5 例（新增 1 例，摘掉 `doFinally` 即红）、真容器 `SandboxDockerEndToEndTest` 2 例通过（第②段钉的就是框架这个行为）、修复后真机日志里「`Container … not found, creating a new one`」这条恢复路径**一次都没再出现**，端到端两次（直连 8081 与走前端 5173 代理各一次）都出了 xlsx + MinIO 预签名下载链接 |
 | DR-51b | **顺带修正 DR-47 的一句错话**：那里写「框架 Docker 客户端自带进程内的 `DockerExecutionGuard`」**不成立**—— 2.0.3 里没有任何 `DockerExecutionGuard`，`SandboxExecutionGuard` 的默认值就是 `noop`（不锁），harness 的 `sandbox/impl/docker/` 里只有 Sandbox / Client / State / Options / Spec。所以 H-11 是**纯新增**，之前那条「会替换掉框架自带保护」的风险不存在。另一条实测事实：**松锁是框架的 `SandboxLifecycleMiddleware` 做的**（顺序 `SandboxManager.release` → `lease.close()`），不在 `SandboxManager.release` 里 —— 写用例时自己手写 release 会得到「只拿不还」的假象（本轮真踩到过，见 §6「H-11 落地说明」） | 这两条都是「读代码 + 跑用例」得到的，不改行为、只改认知：把不存在的风险去掉，把真实的分工记下来 |
 | DR-22 | 共享单例 agent 必须配套**有界内存**：每轮结束清理该 slot 的 `stateCache`（框架在有 store 时会每次调用重新加载状态，缓存可以安全清理），否则堆随会话数无界增长 | 核查结论：`stateCache` / `slotVersions` / `permissionEngineCache` 都是无 LRU、无上限的 `ConcurrentHashMap` |
 | DR-23 | 熔断保持**实例内**计数，不做跨副本共享；其余内存态（限流、入场券、nonce、停止信号）一律共享 | 熔断是「保护下游」的本地动作：某台发现下游在抖就先停它自己的转发，各台独立开合不会串味，也不需要全局一致；做成共享反而每次转发多一次 Redis 往返，还得定义「谁负责复位计数」。限流与凭证恰恰相反——各数一份会被放大成「副本数 × 额度」，是正确性问题 |
@@ -186,6 +189,8 @@
 | L-22 | **执行锁的代价（H-11 之后，只在 `agent-service.sandbox.enabled=true` 时存在）**：①同一个用户的两轮并发不再是「各起一个容器」，而是**后到的等锁** —— 等不到（默认 5 分钟）那一轮直接失败并报错；②生产 PG 走 advisory lock，锁挂在一条**专用连接**上、整轮都占着，所以「同时在跑脚本的用户数」不能超过连接池大小，超了会先把池子占满、再让别的请求排队（包括普通对话） | 嫌等得久就把 `agent-service.sandbox.lock-timeout` 调小（调到几秒＝抢不到立刻报错，不挂着）；连接池按「同时跑脚本的用户数」配；单实例试跑或确认不需要互斥时 `agent-service.sandbox.distributed-lock=false` |
 | L-23 | 事件日志的三条自愈动作都只作用在「**已确认投递**」的那部分上：消费端长期不通（队列 / Redis 挂了）时，未确认的记录会一直堆在活动文件里——**它不裁剪、也不滚动**，所以这段时间磁盘占用会一直涨，保留窗口管不住它 | 这是刻意的取舍：宁可占磁盘也不丢事件（ADR-28）。消费端恢复后第一次维护就会把积压送走、文件随即收拢；真遇到长时间不通，该处理的是消费端本身（日志文件只是它的上游，不是原因） |
 | L-24 | **停止过的轮次在历史回放里看不到「已停止生成」这个标记**：历史是从框架的 `AgentState` 现算出来的（§19.4 / `SessionTranscript`），而框架状态里记的是「模型看到了什么」。中断时框架自己会往状态里追加一句 assistant 消息 `I noticed that you have interrupted me. What can I do for you?`（`ReActAgent#handleInterrupt`，2026-09-26 核 2.0.3 源码），所以那一轮重新打开时看到的是「答案 + 一句英文套话」，而不是界面上那个标记 | 实时那一眼有明确交代（气泡上「已停止生成」）；历史里那句英文是框架的中断收尾语，不是我们漏渲染。刻意不补第二份真相（用户口径：会话记录就用框架自己的能力）。真要补成中文标记，得让历史那条链去读平台审计事实表里的 `REQUEST_STOP`，属于「两套真相对齐」的活，先如实记在这里 |
+| L-25 | **沙箱状态的读 / 写 / 删除在 JDBC 状态库上全部抛错**，被框架降级成「按全新沙箱处理」：harness 把隔离键打包成 `sandbox/user/<agentId>/<用户>` 这种带斜杠的字符串当 `sessionId` 传给 `AgentStateStore`（`SessionSandboxStateStore#slotSessionId`，2026-09-27 核 2.0.3 源码），而框架的 `JdbcAgentStateStore#validateSlotId` 明确不接受路径分隔符，于是每轮 `acquire` / `release` 各留 WARN（实测一轮三条）。**当前没有功能影响**：读不到本来就没有状态、删不到本来也没有东西可删，净效果与平台想要的「每轮清掉沙箱状态」（L-20 / DR-45 ①）一致；但这也意味着那一步实际是**静默失效**的 | 要修就在 `PlatformAgentStateStore` 这个边界上把 `sessionId` 编码成 JDBC 安全的槽位号（可逆转义，`listSessionIds` 反解回来），而不是去改框架的校验；在那之前别把「沙箱状态能持久化 / 能清掉」当既有能力——日志里那几条 WARN 是这套组合的常态，不是某一轮的问题 |
+| L-26 | **技能的 `SKILL.md` 缺 YAML 头部（`name` + `description`）时静默不生效**：harness 的 `WorkspaceSkillRepository` 用 `SkillUtil.createFrom` 解析，缺字段直接抛「The SKILL.md must have a YAML Front Matter…」，被接住后只留一条 WARN——技能既不进系统提示词也没有条目，而它的**接口白名单照旧生效**，于是现象是「模型知道能查数、能上传，却不知道有固定脚本要照做」（2026-09-27 实测：`doctor_perf_excel_report` v1.0.0 没写头部，每轮两条 WARN；补上头部发布 1.0.1 后消失）。另外框架拿头部里的 `name` 去拼技能目录（`WorkspaceSkillRepository#skillDirRelative`），所以 `name` 必须等于技能编码（= 目录名）——写显示名会让「按需取资源」（脚本 / 说明）落到一个不存在的目录上 | 作者写 `SKILL.md` 必须带头部（`name` 用技能编码、`description` 一句话）；平台生成的那条路已经改对（`WorkspaceSkillProvisioner#generateSkillMarkdown` 头部写编码、`description` 为空时兜底，`WorkspaceSkillProvisionerTest` 钉住）。作者自带 `SKILL.md` 的路是「写了就照抄」（刻意如此），所以仍缺一条**发布期检查**：M3 的 check 里没有「包内 `SKILL.md` 能不能过框架解析」这一项 |
 
 
 ---
@@ -674,7 +679,7 @@ P0 的 T0-01 … T0-10 全部已完成，实现时有下面这些**判断**需�
 | H-07 | 数据范围过滤落地（口径已定：ADR-37） | 用户 2026-09-26 明确「先不做」（暂缓）；另外业务接口也还没接真实数据，过滤条件得跟业务表一起写 | 用户说做再做 |
 | H-14 | 观测指标是空壳（`EventQueueMetrics.noop()` / `LogFirstEventMetrics`） | 用户明确先不做（2026-09-26）：先保证行为正确，接哪套指标（Micrometer / Prometheus）等真有看板需求时再定 | 要挂监控看板 / 要按指标告警时 |
 
-**已知限制**见 §5（L-01 … L-24）；这些是「如实承认」而不是待修 bug，除非对应 H 项被启动。
+**已知限制**见 §5（L-01 … L-26）；这些是「如实承认」而不是待修 bug，除非对应 H 项被启动。
 
 **已裁定「不做」的**（不用再提）：H-02「把逐字增量落库做逐字回放」——理由见 DR-54（Codex 与 AgentScope 自家平台都不落逐字；要的是计时与用量，已改成 H-15）；H-12「停止之后从断点继续」——理由见 DR-49（框架没有「恢复同一轮」的接口；自己做的语义是「看到半句重写后半段」，不如重新提问直白）。
 
@@ -879,3 +884,40 @@ span / 会话状态——与我们事实表那几类几乎一一对应。框架�
 
 **触发条件（写死，免得反复讨论）**：出现「必须按逐字粒度作为证据」的要求（例如监管要求留存模型逐字输出）才开；
 届时最小实现是只落**答案**的 delta、不落思考，单独一张表 + 独立保留窗口。
+
+### M3 技能包降门槛：manifest 只必填三项 + 绑定接口的「没写」语义（2026-09-27，已完成）
+
+**用户点名（原话）**：「`boundRoutes` 不需要，等 skill 上传后再页面绑定接口，还有其他参数看看都有必要吗，需要更方便的上传技能才行，不然这个 json 给不懂编码的都不会玩，现在的做一个 skill 太复杂了」。
+
+**一、必填项从十项降到三项**（`SkillPackageInspector.REQUIRED_FIELDS`）
+
+先逐项核过每个字段到底被谁读，再删：
+
+- 留：`id`（技能编码 = 工作区目录名 = 行为主键）、`name`（展示名）、`description`（**下发模型**，判断什么时候该用它）、脚本类再加 `script`（`path / data / timeoutSeconds`）。
+- 删 `version`：不写就按**包内容哈希**自动生成（`0.0-<内容前 8 位>`）。为什么不用时间戳：`sys_skill_version` 的唯一键是 `(skill_code, version)`，时间戳在同一秒里连传两个不同的包会撞唯一键（对上传播只是 500），而内容哈希与「同一内容只有一个版本行」（内容寻址）本来就是同一件事，跟着它走不可能撞。
+- 删 `kind`：`SkillManifest#kindOf`——写了以写的为准（写错照旧被 `KIND_KNOWN` 拦），没写就看包内**有没有 `script` 块**。「类型」这个词对上传的人没有信息量。
+- 删 `boundRoutes` / `params` / `resources` / `status`：第一项语义见下；`params` 与 `resources` 只影响生成 `SKILL.md` 的展示；`status` 全库检索**没有任何读方**（原来只是「必填表里有它」）。
+- 没绑接口时 `EXPORT_COLUMNS_WHITELISTED` 直接判通过并写明「未绑定接口，暂不校验导出列」：导出列的上界来自绑定接口的 `result_schema`，没有绑定就没有「上界」这回事——照旧硬判会把「还没绑接口」误报成「导出列不合规」。
+
+**二、`boundRoutes` 的「没写」≠「写空」**（`SkillManifest#declaresBoundRoutes` + `JdbcSkillPackageRepository#publishSkill`）
+
+- 包内**写了** → 发布时按它**整体替换** `skill_api`；**没写** → 一个都不动（保留页面配的那份）；显式写 `[]` → 清空。`publishSkill` 收到 `null` 就跳过 `writeBindings`，靠 `raw` 里有没有这个键区分。
+- 为什么非要区分：包作者通常不提接口，而管理员在页面上一条条勾出来的绑定是**唯一的生效事实**。按「空 = 清空」处理的话，一次重新发布就会把它静默抹掉——这种故障只能靠对比权限表现才发现。
+
+**三、页面（`/admin/skill`）**
+
+- 上传面板改成说人话：必填三项 + 「接口不用写进包里，发布后到『绑定接口』勾」，并给一份**可复制的最小 manifest 模板**（`<details>` 默认收起，不占版面）。
+- 上传成功后多一个**「去绑定接口」**按钮：包刚收下，这个人多半接着就要配接口；让他自己回上面的技能表里找那一行按钮，正是「功能有、但没人找得到」的来源。深链 `?bind=<编码>` 的滚动复用同一个 `scrollToBindings()`。
+- 本包自带的 `samples/skills/doctor_perf_excel_report/SKILL.md` 里补了一节「manifest 怎么写（照抄这份就行）」，并把与技能包无关的那句「这个技能不声明 /doctor/export/upload」改成实际口径（技能不再自己调它；上传是平台侧动作，权限来自 `role_api` 或绑进技能的写接口）。
+
+**四、生成的 SKILL.md（`WorkspaceSkillProvisioner#generateSkillMarkdown`）**
+
+包内没自带 `SKILL.md`、manifest 又没声明 `boundRoutes` 时，那一节不再**整段省略**——省略会被模型读成「这个技能没有可用工具」，于是只用嘴描述、不去调。改成一句「本包未声明接口清单，绑定由管理端配置；可调接口以本轮可用工具为准」。（作者自带 `SKILL.md` 的包走「写了就照抄」，不受影响；`doctor_perf_excel_report` 就自带。）
+
+**验收证据**
+
+- 单测：`SkillPackageTest` 11 → **16 例**，`mvn -pl management-service -am -Dtest=SkillPackageTest test` **16/16 通过**。新增 5 例：最小 manifest 只写三项即可上传、发布后 `skill_api` 为 0 / 有 `script` 块就推成 script 类型，且 `data`、`timeoutSeconds`、脚本文件在不在仍逐条拦 / 删掉 `description` 照旧被 `MANIFEST_REQUIRED_FIELDS` 驳回 / 重新发布没写 `boundRoutes` 的包**保留**页面绑定 / 显式 `[]` **清空**绑定。
+- 真机 HTTP（管理端 8082，重建并重启后实测）：造一个只有 `id / name / description` 的包上传 → `status=checked`、`version=0.0-79eb04a1`（自动生成）、`kind=agentic`（推出来的），13 项检查全过（含「未声明绑定接口…」「未绑定接口，暂不校验导出列」两条新文案）。
+- 真机 HTTP：`samples` 里那份去掉了 `kind / status / boundRoutes` 的包（v1.1.0，`scripts/gen_perf_excel.py` 的脚本类）上传 → `kind=script`、`status=checked` → 批准发布 → `status=published`；**`skill_api` 的三条绑定原样还在**（`approved_at` 仍是 18:51:48，没被重写），`sys_skill` 的 `updated_at` 变成 19:09:38——「重新发布不清页面绑定」在库里就是这么体现的。
+- 前端：`npm run build`（`vue-tsc --noEmit && vite build`）通过；页面实测上传面板新文案与模板正常渲染、`<details>` 默认收起、`/admin/skill?bind=doctor_perf_excel_report` 深链照旧展开绑定面板。
+- 同步改到的地方：规格书 §18.5.2（必填项 + 绑定三种写法）、`README.md` / `web/README.md`、`samples/skills/doctor_perf_excel_report/manifest.json`（改成最小集，版本升到 1.1.0）、`tools/sandbox-runner/run-skill.ps1`（包内没写白名单时改读管理端生效的那份，两处都没有就直接报错）、`publish-skill.ps1`（发布后没绑接口时给一句提醒）。

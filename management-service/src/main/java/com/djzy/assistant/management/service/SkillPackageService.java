@@ -1,5 +1,6 @@
 package com.djzy.assistant.management.service;
 
+import com.djzy.assistant.common.api.ApiRoute;
 import com.djzy.assistant.common.config.ConfigAuditEntry;
 import com.djzy.assistant.common.config.ConfigAuditWriter;
 import com.djzy.assistant.common.skill.PackageContent;
@@ -12,7 +13,9 @@ import com.djzy.assistant.management.skill.SkillPackageInspector;
 import com.djzy.assistant.management.skill.SkillPackageStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import org.springframework.stereotype.Service;
@@ -59,6 +62,76 @@ public class SkillPackageService {
         return repository.listVersions(skillCode);
     }
 
+    /** 该技能已审核的绑定接口（发布评审的产物），供管理端读回。 */
+    public List<String> listBoundRoutes(String skillCode) {
+        requireText(skillCode, "技能编码");
+        return repository.listBoundRoutes(skillCode);
+    }
+
+    /**
+     * 页面改绑（管理端「技能包 M3 → 绑定接口」）：把该技能已审核的绑定接口**整体替换**成 {@code routes}。
+     *
+     * <p>为什么要有它：绑定此前只有 manifest 一个来源——只为换掉一个接口，就要重建包、重算内容哈希、
+     * 重走上传与评审，代价高到没人愿意改，绑定只会烂在原地。因此改绑是**发布之外的第二条写路径**；
+     * 代价是包内容哈希不再能推导出绑定事实，所以这里把生效值（before/after 完整集合）记进 {@code config_audit}。
+     *
+     * <p>校验口径与上传时的自动检查**逐条一致**：写法合法、接口已在 {@code sys_api} 注册且启用。
+     * 写接口不再被拦（2026-09-27 起旧 ADR-19 ② 取消）：真正管住写操作的是网关与接口服务各自要求的
+     * 一次性 {@code confirmId}（§19.9），不是"配置上不许绑"——禁令只是把该配的东西逼到别处去配。
+     * 重新发布该技能的包时，绑定按包内 manifest 重置——发布始终是不可变版本的唯一入口。
+     *
+     * @param routes 规范三元组文本（{@code 服务名 方法 路径}），重复项自动去重
+     * @return 落库后的实际绑定（**读回**，不拿入参当事实）
+     */
+    @Transactional
+    public List<String> replaceBoundRoutes(String skillCode, List<String> routes, String who, String requestId) {
+        requireText(skillCode, "技能编码");
+        String code = skillCode.trim();
+        if (repository.findSkill(code).isEmpty()) {
+            throw new IllegalArgumentException("技能不存在：" + code);
+        }
+        List<String> declared = normalizeRoutes(routes);
+        Map<String, SkillPackageInspector.ApiMetadata> apis = repository.apiMetadata(declared);
+        List<String> unknown = new ArrayList<>();
+        List<String> disabled = new ArrayList<>();
+        for (String route : declared) {
+            SkillPackageInspector.ApiMetadata api = apis.get(route);
+            if (api == null) {
+                unknown.add(route);
+            } else if (!api.enabled()) {
+                disabled.add(route);
+            }
+        }
+        if (!unknown.isEmpty() || !disabled.isEmpty()) {
+            // fail-closed：一处不合法就整条拒绝，不做「合法的先绑上」——半套绑定比不改更难查
+            throw new IllegalArgumentException("绑定接口不合法（未注册：" + unknown + "；已停用：" + disabled + "）");
+        }
+        List<String> before = repository.listBoundRoutes(code);
+        repository.replaceBoundRoutes(code, declared, who, Instant.now());
+        List<String> after = repository.listBoundRoutes(code);
+        if (!before.equals(after)) {
+            audit(
+                    who,
+                    requestId,
+                    "skill_api:" + code,
+                    Map.<String, Object>of("boundRoutes", before),
+                    Map.<String, Object>of("boundRoutes", after));
+        }
+        return after;
+    }
+
+    /** 规范三元组：解析 → 归一（方法大写）→ 去重；写法不合法整条报错，不猜。 */
+    private static List<String> normalizeRoutes(List<String> routes) {
+        if (routes == null) {
+            return List.of();
+        }
+        LinkedHashSet<String> normalized = new LinkedHashSet<>();
+        for (String route : routes) {
+            normalized.add(ApiRoute.parse(route).format());
+        }
+        return List.copyOf(normalized);
+    }
+
     public List<SkillVersionView> listPending() {
         return repository.listPending();
     }
@@ -91,7 +164,7 @@ public class SkillPackageService {
         Instant now = Instant.now();
         long versionId = repository.insertVersion(new SkillPackageRepository.VersionDraft(
                 manifest.skillCode(),
-                manifest.version(),
+                manifest.version() == null ? autoVersion(content.sha256()) : manifest.version(),
                 content.sha256(),
                 storageKey,
                 content.manifestJson(),
@@ -144,7 +217,8 @@ public class SkillPackageService {
             // 传了旧版本 id 是**调用方用错了**（评审对象永远是最新包），按 400 回，不冒充 500。
             throw new IllegalArgumentException("只能评审该技能的最新包（§19.2 不做版本并存）");
         }
-        SkillManifest manifest = SkillManifest.from(parseJson(version.manifestJson()));
+        Map<String, Object> rawManifest = parseJson(version.manifestJson());
+        SkillManifest manifest = SkillManifest.from(rawManifest);
         Instant now = Instant.now();
         if (!approve) {
             repository.updateStatus(versionId, "rejected", who, null);
@@ -160,12 +234,15 @@ public class SkillPackageService {
         if (!blockingFailures.isEmpty()) {
             throw new IllegalStateException("自动检查未通过，不得发布：" + String.join(", ", blockingFailures));
         }
+        // 包内没写 boundRoutes 就**不动**库里那份绑定（页面「绑定接口」配的），写空数组 [] 才是清空。
+        // 两者必须分开：上传者的包里通常不提接口，若按「空 = 清空」处理，一次重新发布就会把管理员
+        // 在页面上一条条勾出来的绑定静默抹掉——那种故障只能靠对比权限表现才发现。
         repository.publishSkill(
                 version.skillCode(),
                 manifest.name(),
                 manifest.description(),
                 toJson(manifest.paramSchema()),
-                manifest.boundRoutes(),
+                manifest.declaresBoundRoutes() ? manifest.boundRoutes() : null,
                 who,
                 now);
         repository.updateStatus(versionId, "published", who, now);
@@ -221,6 +298,17 @@ public class SkillPackageService {
         } catch (Exception e) {
             throw new IllegalStateException("JSON 序列化失败", e);
         }
+    }
+
+    /**
+     * 未写版本时的自动版本：{@code 0.0-<内容哈希前 8 位>}。
+     *
+     * <p>为什么用内容哈希而不是时间戳：版本行的唯一键是 {@code (skill_code, version)}，时间戳在同一秒里
+     * 连传两个不同的包就会撞唯一键（对上传播只是 500），而内容哈希天然一一对应——同一份内容本来就
+     * 只会有一个版本行（内容寻址），自动版本跟着它走就不可能撞。
+     */
+    private static String autoVersion(String contentSha256) {
+        return "0.0-" + contentSha256.substring(0, 8);
     }
 
     private static void requireText(String value, String what) {

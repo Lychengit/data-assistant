@@ -71,3 +71,22 @@ INSERT INTO sys_api (name, service, http_method, http_path, kind, resource, para
      '{"type":"object","required":["month","metric_key"],"properties":{"month":{"type":"string"},"metric_key":{"type":"string"},"doctor_id":{"type":"string"},"dept_code":{"type":"string"}},"additionalProperties":false}'),
     ('医生名单', 'interface-doctor', 'POST', '/doctor/list', 'read', 'doctor',
      '{"type":"object","properties":{"dept_code":{"type":"string"}},"additionalProperties":false}');
+-- 工件登记表（§18.4.5 W3）：上传到对象存储的导出件在这里留一条可查记录。
+-- 它**不是权限表**（接口服务依然不查权限库），所以放在这里不违反本 schema 的护栏。
+CREATE TABLE artifact (
+    artifact_id VARCHAR(64) PRIMARY KEY,
+    session_id  VARCHAR(64),
+    turn_id     VARCHAR(64),
+    name        VARCHAR(255),
+    size_bytes  BIGINT,
+    locator     TEXT NOT NULL,
+    expires_at  TIMESTAMP,
+    created_at  TIMESTAMP
+);
+
+-- 导出上传（写接口）：kind=write 才会触发写操作确认门（§18.4.5 W1）。
+-- param_schema.properties 必须与 DoctorExportUploadApi.Args 的字段逐一对上，否则接口服务拒绝启动。
+INSERT INTO sys_api (name, service, http_method, http_path, kind, resource, param_schema, result_schema) VALUES
+    ('导出文件上传', 'interface-doctor', 'POST', '/doctor/export/upload', 'write', 'oss',
+     '{"type":"object","required":["file_name","content_base64"],"properties":{"file_name":{"type":"string"},"content_base64":{"type":"string"},"sandbox_path":{"type":"string"},"content_type":{"type":"string"},"session_id":{"type":"string"},"artifact_name":{"type":"string"}},"additionalProperties":false}',
+     '{"type":"object","properties":{"artifact_id":{"type":"string"},"file_name":{"type":"string"},"size_bytes":{"type":"integer"},"content_sha256":{"type":"string"},"storage_key":{"type":"string"},"download_url":{"type":"string"},"download_url_expires_at":{"type":"string"},"object_expires_at":{"type":"string"}}}');

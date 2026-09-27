@@ -212,8 +212,12 @@ final class SandboxSkillStaging {
      * 这类能跳出目录的名字挡掉（点不在允许集合里）。
      *
      * <p>框架自己的 {@code MarketplaceStager} 处理同一个问题用的是同一套办法。
+     *
+     * <p>包内共用（2026-09-27 起）：沙箱的工件目录（{@link SandboxArtifactMount}）按同一个用户
+     * 也落在这个命名规则下，两处必须同源——否则「技能暂存在 alice/、工件却写到 alice-3f2a/」这种
+     * 错配在日志里看不出来。
      */
-    private static String dirNameFor(String userId) {
+    static String dirNameFor(String userId) {
         String identity = (userId == null || userId.isBlank()) ? ANONYMOUS : userId;
         String usable = identity.replaceAll("[^A-Za-z0-9_-]", "_");
         boolean lossless = !usable.isBlank() && usable.equals(identity) && usable.length() <= 64;

@@ -11,7 +11,10 @@ CREATE TABLE sys_user (
 
 CREATE TABLE sys_role (
     id        BIGINT PRIMARY KEY,
-    role_code VARCHAR(64) NOT NULL UNIQUE
+    role_code VARCHAR(64) NOT NULL UNIQUE,
+    -- 展示名 / 备注：管理端的角色下拉框要能显示"系统管理员"而不是"admin"（生产库 V1 迁移里就有这两列）
+    role_name VARCHAR(64),
+    remark    VARCHAR(255)
 );
 
 CREATE TABLE sys_user_role (
@@ -225,7 +228,7 @@ CREATE TABLE refresh_token (
 );
 
 -- 演示账号：admin（admin 角色）、alice（boss 角色，用于验证非管理员被拒）。
-INSERT INTO sys_role (id, role_code) VALUES (1, 'admin'), (2, 'boss');
+INSERT INTO sys_role (id, role_code, role_name, remark) VALUES (1, 'admin', '系统管理员', '全部权限，含管理配置'), (2, 'boss', '上级领导', '跨域可见，范围可配置');
 
 -- 口令哈希由 PasswordHasher 生成（固定盐仅用于演示种子；真实部署由账号管理写入）。
 INSERT INTO sys_user (id, username, password_hash, display_name, status) VALUES

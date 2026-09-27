@@ -41,6 +41,31 @@ class JdbcConfirmStoreTest {
     }
 
     @Test
+    void registeredCredentialIsPendingAndConsumableExactlyOnce() {
+        // 写侧登记（用户点确认时 agent-service 调的就是它）：落一条 pending，网关随后消费
+        String confirmId = store.register("alice", "s-9", "t-9", "tool.write", "用户确认执行写操作：iface_doctor_export_upload", null);
+
+        assertTrue(store.find(confirmId).isPresent(), "登记完必须查得到，否则网关认不出这张凭据");
+        assertEquals("alice", store.find(confirmId).orElseThrow().userId());
+        assertEquals("pending", jdbc.queryForObject(
+                "SELECT status FROM pending_confirm WHERE confirm_id = ?", String.class, confirmId));
+
+        assertTrue(store.consume(confirmId, "alice"), "刚登记的凭据必须能被网关消费掉");
+        assertFalse(store.consume(confirmId, "alice"), "凭据是一次性的，消费第二次必须失败");
+        assertEquals("approved", jdbc.queryForObject(
+                "SELECT status FROM pending_confirm WHERE confirm_id = ?", String.class, confirmId));
+    }
+
+    @Test
+    void registerRefusesWithoutIdentity() {
+        // 没有用户或会话的凭据等于一张对谁都有效的通行证，宁可不登记
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> store.register(null, "s-1", "t-1", "tool.write", "x", null));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> store.register("alice", " ", "t-1", "tool.write", "x", null));
+    }
+
+    @Test
     void consumeRejectsExpiredWrongOwnerOrAlreadyResolved() {
         assertFalse(store.consume("c-2", "alice"));
         assertFalse(store.consume("c-3", "alice"));

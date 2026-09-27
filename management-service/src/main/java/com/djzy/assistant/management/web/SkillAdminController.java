@@ -69,6 +69,7 @@ public class SkillAdminController {
                 .findFirst()
                 .ifPresent(summary -> body.put("skill", summary));
         body.put("versions", skillPackageService.listVersions(skillCode).stream().map(VersionBody::of).toList());
+        body.put("boundRoutes", skillPackageService.listBoundRoutes(skillCode));
         return body;
     }
 
@@ -113,6 +114,30 @@ public class SkillAdminController {
         return VersionBody.of(view);
     }
 
+    /**
+     * 页面改绑：整体替换该技能已审核的绑定接口（{@code skill_api}）。
+     *
+     * <p>这是「技能 ↔ 接口」的第二条写路径：发布时按包内 manifest 的 {@code boundRoutes} 写入，
+     * 之后管理员在「技能包 M3 → 关联接口」里直接改。校验口径与上传时的自动检查逐条一致
+     * （接口已注册 + 已启用；写接口同样可绑，见 {@code SkillPackageService#replaceBoundRoutes}），
+     * 改动写 {@code config_audit}。
+     *
+     * <p>为什么不让管理员去改包：改一个接口就要重建包、重算内容哈希、重走上传评审，
+     * 实际结果是没人愿意改。副作用是包内容哈希不再能推导出绑定事实，因此审计必须记全量 before/after。
+     * 重新发布该技能的包时：包内写了 {@code boundRoutes} 就按它重置，**没写则保持这份不动**。
+     */
+    @PutMapping(path = "/{skillCode}/apis", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> replaceBoundApis(
+            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+            @PathVariable String skillCode,
+            @RequestBody(required = false) BoundApisRequest request) {
+        UserIdentity admin = currentUserService.requireAdmin(authorization);
+        // 缺省（空 body / 无 boundRoutes）= 清空绑定：这是管理员能做的显式动作，不猜成「保持不动」
+        List<String> routes = request == null || request.boundRoutes() == null ? List.of() : request.boundRoutes();
+        List<String> after = skillPackageService.replaceBoundRoutes(skillCode, routes, admin.userId(), null);
+        return Map.of("skillCode", skillCode, "boundRoutes", after, "updated", true);
+    }
+
     @PutMapping(path = "/{skillCode}/enabled", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> setEnabled(
             @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
@@ -136,6 +161,9 @@ public class SkillAdminController {
     public record ReviewRequest(Boolean approve, String reason, List<String> exportedColumns) {}
 
     public record EnabledRequest(Boolean enabled) {}
+
+    /** 改绑请求体：{@code ["服务名 方法 路径", ...]} 的完整集合（整体替换，不是增量）。 */
+    public record BoundApisRequest(List<String> boundRoutes) {}
 
     /** 版本对外视图（不暴露 storage_key 之外的内部字段；manifest 原样返回给评审人看）。 */
     public record VersionBody(

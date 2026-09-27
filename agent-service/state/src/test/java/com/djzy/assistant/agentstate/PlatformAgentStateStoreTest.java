@@ -30,6 +30,9 @@ class PlatformAgentStateStoreTest {
     private static final String KEY_A = "platform_turn";
     private static final String KEY_B = "agent_state";
 
+    /** 框架给沙箱状态用的键（{@code SessionSandboxStateStore.SANDBOX_STATE_KEY}）。 */
+    private static final String KEY_SANDBOX = "_sandbox_state";
+
     private JdbcDataSource dataSource;
     private AgentStateStore store;
 
@@ -99,6 +102,31 @@ class PlatformAgentStateStoreTest {
         assertEquals(Set.of("s-1", "s-2"), store.listSessionIds("u-1"));
         assertEquals(Set.of("s-9"), store.listSessionIds("u-2"));
         assertFalse(store.listSessionIds("u-3").contains("s-1"));
+    }
+
+    @Test
+    void 路径式会话号也能存取_沙箱状态就差这一处转义() {
+        // 框架给沙箱状态用的会话号是路径式的（IsolationScope.USER → sandbox/user/<agentId>/<userId>，
+        // 见 SessionSandboxStateStore#slotSessionId），而框架的 JDBC 实现拒绝含 / 与 \ 的槽位号：
+        // 不转义的话，这里的 save 会直接抛 IllegalArgumentException——2026-09-27 真机上就是这么炸的。
+        String slot = "sandbox/user/doctor-data-assistant/admin";
+
+        store.save(null, slot, KEY_SANDBOX, new Note("容器那点状态"));
+        assertEquals("容器那点状态", store.get(null, slot, KEY_SANDBOX, Note.class).orElseThrow().getText());
+
+        store.delete(null, slot, KEY_SANDBOX);
+        assertTrue(store.get(null, slot, KEY_SANDBOX, Note.class).isEmpty());
+    }
+
+    @Test
+    void 转义可逆_含斜杠的会话号与字面量百分号不会撞到一起() {
+        store.save("u-1", "a/b", KEY_A, new Note("斜杠"));
+        store.save("u-1", "a%2Fb", KEY_A, new Note("字面量"));
+
+        assertEquals("斜杠", store.get("u-1", "a/b", KEY_A, Note.class).orElseThrow().getText());
+        assertEquals("字面量", store.get("u-1", "a%2Fb", KEY_A, Note.class).orElseThrow().getText());
+        // 列出来的时候必须还原成调用方给的原样，而且不能把两者混成一个
+        assertEquals(Set.of("a/b", "a%2Fb"), store.listSessionIds("u-1"));
     }
 
     /** 表由迁移脚本建，不由应用建；用例里就地建一张同口径的表（H2 的 state_data 用 CLOB）。 */

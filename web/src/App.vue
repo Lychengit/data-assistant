@@ -6,7 +6,7 @@ const route = useRoute();
 const router = useRouter();
 
 const adminLinks = [
-  { to: "/admin/role-api", label: "角色授权 M2" },
+  { to: "/admin/role-grant", label: "角色授权（技能/接口）" },
   { to: "/admin/skill", label: "技能包 M3" },
   { to: "/admin/api", label: "接口注册 M4" },
   { to: "/admin/metric", label: "口径字典 M5" },

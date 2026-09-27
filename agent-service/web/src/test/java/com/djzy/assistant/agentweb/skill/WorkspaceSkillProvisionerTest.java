@@ -54,6 +54,12 @@ class WorkspaceSkillProvisionerTest {
         // 包里有 manifest 但没有 SKILL.md：说明文件由平台按 manifest 生成（模型看到的就是它）。
         String skill = read("skills/" + CODE + "/SKILL.md");
         assertTrue(skill.contains("# 收入查询"), () -> "生成的技能说明里该有名字：" + skill);
+        // 头部是框架的硬契约（L-26）：name 必须是技能编码——框架拿它拼技能目录（skillDirRelative），
+        // 写成显示名会让「按需取资源」（脚本 / 说明）找不到目录；缺头部则技能静默不生效。
+        assertTrue(skill.startsWith("---\n"), () -> "生成的技能说明必须以 YAML 头部开头：" + skill);
+        assertTrue(
+                skill.contains("name: " + CODE),
+                () -> "头部里的 name 必须是技能编码（框架拿它拼技能目录）：" + skill);
         assertEquals("print(1)", read("skills/" + CODE + "/scripts/run.py"), "配套文件要原样放进去（脚本执行是 H-06b）");
 
         Map<String, Object> index = index();

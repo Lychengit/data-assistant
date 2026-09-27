@@ -28,6 +28,20 @@ interface-doctor:
   # 单次查询返回行数上限：超出即截断并标注，防止把模型上下文打爆（§4.8）。
   max-rows: 5000
 
+# 对象存储：接口服务要在上传后回一张「限时下载链接」，只有 provider=s3（MinIO/OSS）才签得出来。
+# 本机 provider=local 时上传照常登记，但下载地址为空（本地文件系统没有签名 URL 这个概念）。
+object-storage:
+  provider: ${OBJECT_STORAGE_PROVIDER:local}
+  root-dir: ${OBJECT_STORAGE_ROOT_DIR:./data/object-storage}
+  key-prefix: ${OBJECT_STORAGE_KEY_PREFIX:}
+  s3:
+    endpoint: ${OBJECT_STORAGE_S3_ENDPOINT:}
+    region: ${OBJECT_STORAGE_S3_REGION:us-east-1}
+    access-key: ${OBJECT_STORAGE_S3_ACCESS_KEY:}
+    secret-key: ${OBJECT_STORAGE_S3_SECRET_KEY:}
+    bucket: ${OBJECT_STORAGE_S3_BUCKET:doctor-assistant}
+    path-style: ${OBJECT_STORAGE_S3_PATH_STYLE:true}
+
 logging:
   level:
     com.djzy.assistant: INFO

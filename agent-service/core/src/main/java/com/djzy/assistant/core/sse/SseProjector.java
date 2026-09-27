@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 中立事件 → SSE 业务投影（§12.2 / ADR-27 ②）。
@@ -17,6 +19,14 @@ import java.util.function.Supplier;
  * 因此换运行时不动前端。思考流是否下发由用户设置决定（§20.6）。
  */
 public final class SseProjector {
+
+    private static final Logger log = LoggerFactory.getLogger(SseProjector.class);
+
+    /** 一段旁白里至少有多少个拉丁字母，才值得怀疑它是「英文旁白」。 */
+    private static final int NON_CHINESE_MIN_LATIN = 12;
+
+    /** 至少几个「两字母以上的词」，才算像一句英文（挡住 {@code perf.xlsx} 这类文件名）。 */
+    private static final int NON_CHINESE_MIN_WORDS = 3;
 
     private final Supplier<ThinkingVisibility> thinkingVisibility;
 
@@ -107,11 +117,68 @@ public final class SseProjector {
         payload.put("type", type);
         payload.put("seq", event.seq());
         payload.put("source", event.source());
-        payload.put("content", str(event.payload(), "delta", str(event.payload(), "text", "")));
+        String content = str(event.payload(), "delta", str(event.payload(), "text", ""));
+        payload.put("content", content);
         if (event.payload().get("toolName") != null) {
             payload.put("toolName", event.payload().get("toolName"));
         }
+        if (isNonChineseNarration(content)) {
+            // 语言要求写在系统提示词里，但**拦不住**模型（2026-09-27 实测：中文结论外面套着
+            // 「I'll load the export skill…」这种英文旁白）。这里不改写内容——改写模型的话是另一种
+            // 撒谎方式——而是把它标出来并留痕：日志里能立刻看出还剩多少违规，界面也能据此处理。
+            log.warn("模型输出了非中文旁白（应当全程中文）：seq={} source={} 片段={}", event.seq(), event.source(), preview(content));
+            payload.put("lang", "en");
+        }
         return Optional.of(SseEvent.of(SseEventType.STEP, payload));
+    }
+
+    /**
+     * 判断一段旁白是不是「非中文」：**一个中日韩字符都没有、又确实像一句英文**才算。
+     *
+     * <p>为什么口径要这么保守：工具名、路径、字段名、代码片段本来就该是英文，一句中文里夹几个
+     * 英文词也完全正常。所以三件事同时成立才算：没有汉字、含路径分隔符以外的拉丁字母不少于
+     * {@link #NON_CHINESE_MIN_LATIN} 个、且至少 {@link #NON_CHINESE_MIN_WORDS} 个「两字母以上的词」。
+     * 带 {@code /} 或 {@code \} 的一律放行——那是路径 / 命令，不是旁白。
+     *
+     * <p>判错的代价是单向的：漏报只是少一条日志，误报会在界面上给正常内容贴上「非中文」标签。
+     * 所以宁可漏，不可误报。
+     */
+    static boolean isNonChineseNarration(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        if (text.indexOf('/') >= 0 || text.indexOf('\\') >= 0) {
+            return false;
+        }
+        int latin = 0;
+        int words = 0;
+        int run = 0;
+        for (int index = 0; index <= text.length(); index++) {
+            char ch = index == text.length() ? ' ' : text.charAt(index);
+            if (isCjk(ch)) {
+                return false;
+            }
+            if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+                latin++;
+                run++;
+                continue;
+            }
+            if (run >= 2) {
+                words++;
+            }
+            run = 0;
+        }
+        return latin >= NON_CHINESE_MIN_LATIN && words >= NON_CHINESE_MIN_WORDS;
+    }
+
+    /** 中日韩统一表意文字（含扩展 A）与中文标点里最具辨识度的那几个。 */
+    private static boolean isCjk(char ch) {
+        return (ch >= '\u4e00' && ch <= '\u9fff') || (ch >= '\u3400' && ch <= '\u4dbf');
+    }
+
+    private static String preview(String text) {
+        String flat = text.replace('\n', ' ').trim();
+        return flat.length() <= 60 ? flat : flat.substring(0, 60) + "…";
     }
 
     /** 业务事件（skill_start / artifact / sandbox_job / clarify）用 CUSTOM 承载，按 payload 的 {@code sseType} 映射。 */

@@ -280,6 +280,12 @@ public final class WorkspaceSkillProvisioner implements SkillProvisioner {
             for (String route : manifest.boundRoutes()) {
                 body.append("- ").append(route).append("\n");
             }
+        } else if (!manifest.declaresBoundRoutes()) {
+            // 包内没声明绑定（2026-09-27 起 boundRoutes 可选，绑定改在管理端「技能包 M3 → 绑定接口」里配）。
+            // 这里列不出清单，但**不能整段省略**：模型会把「说明里没列接口」读成「这个技能没有可用工具」，
+            // 于是只用嘴描述、不去调。指回工具清单比列一份可能过期的清单更准。
+            body.append("\n## 绑定的数据接口\n");
+            body.append("（本包未声明接口清单，绑定由管理端配置；可调接口以本轮可用工具为准）\n");
         }
         List<String> otherFiles = resourcePaths.stream().sorted().toList();
         if (!otherFiles.isEmpty()) {
@@ -296,11 +302,17 @@ public final class WorkspaceSkillProvisioner implements SkillProvisioner {
                             ? "，配套文件已随技能放在工作区，并在执行环境（容器）的同一路径下可用，可以直接执行。\n"
                             : "，配套文件已随技能放在工作区；当前运行时不执行脚本，需要执行时如实说明。\n");
         }
+        // 头部这两个字段是**框架的硬契约**，写错了技能会「静默不生效」（只留一条 WARN，见 L-26）：
+        // ① name 必须是**技能编码**：框架拿它去拼技能目录（WorkspaceSkillRepository#skillDirRelative），
+        //    写成显示名（中文）会让「按需取资源」（脚本 / 说明）落到一个不存在的目录上——技能列得出来、脚本读不到；
+        // ② description 不能空：SkillUtil.createFrom 缺 name / description 直接抛。
         Map<String, Object> metadata = new LinkedHashMap<>();
-        metadata.put("name", name);
-        if (manifest.description() != null && !manifest.description().isBlank()) {
-            metadata.put("description", manifest.description());
-        }
+        metadata.put("name", code);
+        metadata.put(
+                "description",
+                manifest.description() == null || manifest.description().isBlank()
+                        ? name
+                        : manifest.description());
         metadata.put("platform-skill-code", code);
         if (manifest.version() != null) {
             metadata.put("platform-version", manifest.version());

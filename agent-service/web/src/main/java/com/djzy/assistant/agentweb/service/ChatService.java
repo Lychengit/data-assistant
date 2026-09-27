@@ -25,6 +25,7 @@ import com.djzy.assistant.common.web.auth.UserContextHolder;
 import com.djzy.assistant.core.runtime.RuntimeRegistry;
 import com.djzy.assistant.core.sse.SseProjector;
 import com.djzy.assistant.spi.AgentErrorCode;
+import com.djzy.assistant.spi.PendingConfirmationException;
 import com.djzy.assistant.spi.AgentEvent;
 import com.djzy.assistant.spi.RuntimeMisconfiguredException;
 import com.djzy.assistant.spi.AgentEventType;
@@ -208,6 +209,13 @@ public final class ChatService {
         ChatSession session = requireSession(userId, sessionId);
         if (session.running()) {
             throw ApiException.conflict("上一轮还在处理中，请等待完成或停止后再提问");
+        }
+        if (session.suspended()) {
+            // 会话里还挂着一张没答复的写操作确认卡（§19.9）：这时再发新消息，框架会直接抛
+            // 「有待批准的工具调用、这一轮却没给确认结果」，落到用户眼里就是「服务暂不可用，请稍后再试」
+            // （2026-09-27 实测），而重试永远不会好。这里当场挡下来，并说清该做哪一步。
+            // 只认内存里的挂起标记：进程重启过的那种由运行时侧的 PendingConfirmationException 兜底。
+            throw ApiException.conflict(UnifiedErrors.CONFIRM_PENDING);
         }
         // 再问一句**跨副本**的：这一轮可能正跑在别的实例上，本实例的内存里看不到任何痕迹。
         // 真正把关的是下面 launch 里的占坑（这里是让人早点拿到 409，不必先发券再失败）。
@@ -468,18 +476,25 @@ public final class ChatService {
                         event -> onEvent(session, turnId, event, turnEnded, text)),
                 UserContextHolder.propagateConsumer(error -> {
                     log.error("轮次异常：sessionId={} turnId={}", session.sessionId(), turnId, error);
-                    // 运行时已经把「能照着改」的配置类失败翻译成了 RuntimeMisconfiguredException；
-                    // 剩下的才是真故障，统一收成一句「服务暂不可用」（TCK-12：不外泄内部细节）。
-                    boolean misconfigured = error instanceof RuntimeMisconfiguredException;
+                    // 运行时会把两类**照做就能好**的失败翻译成自己的异常类型：配置缺失（去管理端配模型）、
+                    // 会话里还挂着没答复的写操作确认卡（去点确认或取消）。剩下的才是真故障，统一收成一句
+                    // 「服务暂不可用」（TCK-12：不外泄内部细节）。
+                    String code;
+                    String message;
+                    if (error instanceof RuntimeMisconfiguredException misconfigured) {
+                        code = AgentErrorCode.LLM_UNAVAILABLE.name();
+                        message = misconfigured.userMessage();
+                    } else if (error instanceof PendingConfirmationException pending) {
+                        // 这类失败**不是**服务故障：用户少点了一次确认（§19.9）。说清那一步，
+                        // 比让他对着「服务暂不可用」反复重试有用（2026-09-27 实测）。
+                        code = AgentErrorCode.TOOL_CONFIRM_REQUIRED.name();
+                        message = pending.userMessage();
+                    } else {
+                        code = AgentErrorCode.INTERNAL.name();
+                        message = UnifiedErrors.SERVICE_UNAVAILABLE;
+                    }
                     emit(session, turnId, SseEvent.of(
-                            SseEventType.ERROR,
-                            Map.of(
-                                    "code",
-                                    misconfigured ? AgentErrorCode.LLM_UNAVAILABLE.name() : AgentErrorCode.INTERNAL.name(),
-                                    "message",
-                                    misconfigured
-                                            ? ((RuntimeMisconfiguredException) error).userMessage()
-                                            : UnifiedErrors.SERVICE_UNAVAILABLE)));
+                            SseEventType.ERROR, Map.of("code", code, "message", message)));
                     finish(session, turnId, turnEnded);
                 }),
                 UserContextHolder.propagate(() -> finish(session, turnId, turnEnded)));
@@ -574,9 +589,15 @@ public final class ChatService {
             return;
         }
         record(session, withUserText(event, userText));
-        if (event.type() == AgentEventType.TURN_END) {
+        if (event.type() == AgentEventType.AWAITING_CONFIRM) {
+            // 先记下来：框架拦下写调用后发的是 REQUEST_STOP，终点事件上不会带 suspended 标记。
+            session.markConfirmRaised();
+        }
+        if (event.type() == AgentEventType.TURN_END || event.type() == AgentEventType.REQUEST_STOP) {
             turnEnded.set(true);
-            if (suspended(event)) {
+            // 「等确认」有两个来源：框架显式说等确认（TURN_END{suspended=true}），或**这一轮弹过确认卡**。
+            // 后者是实测补上的：只认前者的话会话不会被标成挂起，用户点「确认」拿到 409（2026-09-27 实测）。
+            if (suspended(event) || session.confirmRaised()) {
                 session.markSuspended();
                 saveSuspendSnapshot(session);
                 // 挂起也是「这一轮跑完了」（等用户确认），坑位要放掉，否则用户点确认时会被自己挡住。

@@ -560,7 +560,7 @@ limitations:
 
   - id: "L-20"
     limitation: "沙箱容器是「一轮一个」（框架 SandboxManager#release 会 stop + rm --force），而框架把「工作区投影做过一次」按内容哈希记在沙箱状态里；下一轮 acquire 会 resume 上一轮的 state 并把这个哈希带进来，哈希没变就跳过投影——于是变成「第一轮容器里跑得动技能脚本、第二轮开始脚本文件不在」"
-    mitigation: "平台每轮开始前清掉该 (agent, 用户) 的沙箱状态（AgentscopeRuntimeAdapter#clearStaleSandboxState），让框架按全新沙箱处理（起容器 + 应用工作区 + 重新投影）。真容器用例 SandboxDockerEndToEndTest 把这个假设钉住了（不清状态时第二轮容器里确实没有脚本、清掉后第三轮又有）；框架哪天改成「容器重建就重投影」，这一步清理就可以撤。清的是沙箱状态（框架的 _sandbox_state 槽位），不是会话状态——聊了什么在另一把键上，照样跨实例、跨轮次"
+    mitigation: "**2026-09-27 起改成「轮末作废」（DR-57）**：一轮的流一终止就把该 (agent, 用户) 的沙箱状态置成 tombstone（AgentscopeRuntimeAdapter#forgetSandboxState），下一个容器必定走「干净创建 → 重新投影」。为什么不能在轮初清：框架是在**本轮结束时**才写回状态（SandboxLifecycleMiddleware#releaseForCall）、而那时容器已经被它删了，甲轮还没释放、乙轮已经开始准备时，甲轮随后的写回会把乙轮刚清掉的那条复活（真机 19:47 那次就是这么丢的）。轮初那条清理保留着（AgentscopeRuntimeAdapter#resetSandboxStateIfContainerGone），管的是「状态里那台容器真的没了」这一个残留场景——真撞上了就清掉，让框架按全新沙箱处理（起容器 + 应用工作区 + 重新投影）。真容器用例 SandboxDockerEndToEndTest 把这个假设钉住了（不清状态时第二轮容器里确实没有脚本、清掉后第三轮又有）；框架哪天改成「容器重建就重投影」，这一步清理就可以撤。清的是沙箱状态（框架的 _sandbox_state 槽位），不是会话状态——聊了什么在另一把键上，照样跨实例、跨轮次"
 
   - id: "L-21"
     limitation: "沙箱隔离「按用户分槽」这条假设已由 SandboxIsolationTest（2026-09-26）钉住：平台造出来的 SandboxContext 确实带 USER、不同用户落在不同槽位、同一个用户换会话仍是同一个槽位、甲存的沙箱状态乙读不到（把隔离粒度改成 AGENT 这几条会红，已实测）。**并发面在 H-11 之后已经有覆盖**：没有锁时同一用户并发两轮会各起一个沙箱、后写覆盖先写（用例把这个行为当事实记着）；接上锁之后那个窗口被真实抢锁用例挡住（PlatformSandboxExecutionGuardTest），并由一条「用真中间件驱动」的用例证明框架确实在**建容器之前**拿锁、在**整轮结束之后**松手"
@@ -574,3 +574,9 @@ limitations:
   - id: "L-24"
     limitation: "停止过的轮次在**历史回放**里看不到「已停止生成」这个标记：历史是从框架的 AgentState 现算出来的（§19.4 / SessionTranscript），而框架状态里记的是「模型看到了什么」。中断时框架自己会往状态里追加一句 assistant 消息 I noticed that you have interrupted me. What can I do for you?（ReActAgent#handleInterrupt，2026-09-26 核 2.0.3 源码），所以那一轮重新打开时，看到的是「答案 + 一句英文套话」，而不是界面上那个标记"
     mitigation: "实时那一眼有明确交代（气泡上「已停止生成」）；历史里那句英文是框架的中断收尾语，不是我们漏渲染。刻意不补第二份真相（用户口径：会话记录就用框架自己的能力）。真要补成中文标记，得让历史那条链去读平台审计事实表里的 REQUEST_STOP，属于「两套真相对齐」的活，先如实记在这里"
+  - id: "L-25"
+    limitation: "沙箱状态的读 / 写 / 删除在 JDBC 状态库上全部抛错、被框架降级成按全新沙箱处理：harness 把隔离键打包成 sandbox/user/<agentId>/<用户> 这种带斜杠的字符串当 sessionId 传给 AgentStateStore（SessionSandboxStateStore#slotSessionId，2026-09-27 核 2.0.3 源码），而框架的 JdbcAgentStateStore.validateSlotId 明确不接受路径分隔符，于是每轮 acquire / release 各留 WARN（实测一轮三条）。当前没有功能影响——读不到本来就没有状态、删不到本来也没有东西可删，净效果与平台想要的「每轮清掉沙箱状态」（L-20 / DR-45 ①）一致；但这也意味着那一步实际是静默失效的"
+    mitigation: "要修就在 PlatformAgentStateStore 这个边界上把 sessionId 编码成 JDBC 安全的槽位号（可逆转义，listSessionIds 反解回来），而不是去改框架的校验；在那之前别把「沙箱状态能持久化 / 能清掉」当既有能力——日志里那几条 WARN 是这套组合的常态，不是某一轮的问题"
+  - id: "L-26"
+    limitation: "技能的 SKILL.md 缺 YAML 头部（name + description）时静默不生效：harness 的 WorkspaceSkillRepository 用 SkillUtil.createFrom 解析，缺字段直接抛 The SKILL.md must have a YAML Front Matter，被接住后只留一条 WARN——技能既不进系统提示词也没有条目，而它的接口白名单照旧生效，于是现象是「模型知道能查数、能上传，却不知道有固定脚本要照做」（2026-09-27 实测：doctor_perf_excel_report v1.0.0 没写头部，每轮两条 WARN；补上头部发布 1.0.1 后消失）。另外框架拿头部里的 name 去拼技能目录（WorkspaceSkillRepository#skillDirRelative），所以 name 必须等于技能编码（= 目录名）——写显示名会让「按需取资源」（脚本 / 说明）落到一个不存在的目录上"
+    mitigation: "作者写 SKILL.md 必须带头部（name 用技能编码、description 一句话）；平台生成的那条路已经改对（WorkspaceSkillProvisioner#generateSkillMarkdown 头部写编码、description 为空时兜底，WorkspaceSkillProvisionerTest 钉住）。作者自带 SKILL.md 的路是「写了就照抄」（刻意如此），所以仍缺一条发布期检查：M3 的 check 里没有「包内 SKILL.md 能不能过框架解析」这一项"

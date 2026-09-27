@@ -175,7 +175,7 @@ onMounted(load);
           <span class="muted">类型</span>
           <select v-model="form.kind">
             <option value="read">read（只读）</option>
-            <option value="write">write（写，默认不对技能开放，ADR-19）</option>
+            <option value="write">write（写：调用时要一次确认卡，§19.9）</option>
           </select>
         </label>
         <label class="grow"><span class="muted">资源</span><input v-model="form.resource" /></label>

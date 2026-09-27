@@ -36,5 +36,8 @@ final class CallAttributes {
     /** 已确认项 id（写操作要带，一次性，§19.9）。 */
     static final String CONFIRM_ID = "confirmId";
 
+    /** 读沙箱产物字节的口子（{@link SandboxArtifactReader}）——写操作上传文件时用。 */
+    static final String SANDBOX_ARTIFACT_READER = "sandboxArtifactReader";
+
     private CallAttributes() {}
 }
